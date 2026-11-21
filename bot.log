@@ -28227,3 +28227,8 @@ Original description: Bad Request: group chat was upgraded to a supergroup chat
 2026-11-21 17:31:13,318 | INFO    | vpnbot | IN  uid=6827569074 @inthe5thclass msg: [new_chat_members]
 2026-11-21 17:31:30,111 | INFO    | vpnbot | IN  uid=6827569074 @inthe5thclass msg: саламц алекум
 2026-11-21 17:31:56,861 | INFO    | vpnbot | IN  uid=6827569074 @inthe5thclass msg: [left_chat_member]
+2026-11-21 17:41:32,674 | INFO    | aiogram.dispatcher | Polling stopped
+2026-11-21 17:41:32,683 | ERROR   | aiogram.dispatcher | Failed to fetch updates - TelegramNetworkError: HTTP Client says - ServerDisconnectedError: Server disconnected
+2026-11-21 17:41:32,683 | WARNING | aiogram.dispatcher | Sleep for 1.000000 seconds and try again... (tryings = 0, bot id = 9271068997)
+2026-11-21 17:41:32,947 | INFO    | vpnbot | Бот остановлен
+2026-11-21 17:41:32,950 | INFO    | aiogram.dispatcher | Polling stopped for bot @wsquadpartners_bot id=9271068997 - 'wsquadpartners'
