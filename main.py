@@ -1,5 +1,9 @@
 """
-VPN Payout Bot — compact rewrite (без рекламного текста).
+VPN Payout Bot — compact rewrite.
+- Рекламный текст убран
+- Кнопка "Скачать файл" убрана (файл и так в сообщении)
+- Добавлены: поддержка, FAQ, рефералка, новости
+- "Купить звёзды" — URL-кнопка в меню
 """
 import asyncio
 import html
@@ -101,6 +105,32 @@ DEFAULTS = {
         "• 100 000 — +100%\n"
         "• 500 000 — индивидуально"
     ),
+    "support_text": (
+        "📞 <b>ПОДДЕРЖКА</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "По любым вопросам пиши:\n"
+        "• @your_support\n"
+        "• support@example.com\n\n"
+        "Отвечаем в течение 24 часов."
+    ),
+    "faq_text": (
+        "❓ <b>ЧАСТЫЕ ВОПРОСЫ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>Когда придёт выплата?</b>\n"
+        "После одобрения — холд 14 дней, потом выплата.\n\n"
+        "<b>Почему отклонили?</b>\n"
+        "Причина всегда указана в «Моих заявках».\n\n"
+        "<b>Можно ли подать повторно?</b>\n"
+        "Да, если исправил ошибку. Ссылка должна быть другая.\n\n"
+        "<b>Что такое холд?</b>\n"
+        "Период проверки просмотров после одобрения.\n\n"
+        "<b>Как вставить баннер?</b>\n"
+        "Смотри гайд в канале новостей."
+    ),
+    "news_url": "https://t.me/telegram",
+    "support_username": "@your_support",
+    "stars_url": "https://t.me/telegram",
+    "stars_price_rub": "100",
     "log_enabled": "0", "log_chat_id": "",
     "log_topic_payouts": "", "log_topic_banners": "", "log_topic_users": "",
     "log_topic_settings": "", "log_topic_errors": "",
@@ -112,7 +142,8 @@ GROUPS = {
     "titles":  ("📄 Заголовки разделов",
                 ["title_main", "title_catalog", "title_payout",
                  "title_my_payouts", "title_rules", "title_admin"]),
-    "texts":   ("📝 Большие тексты", ["welcome_text", "rules_text"]),
+    "texts":   ("📝 Большие тексты",
+                ["welcome_text", "rules_text", "faq_text", "support_text"]),
 }
 
 LABELS = {
@@ -120,6 +151,8 @@ LABELS = {
     "daily_limit": "🚦 Лимит заявок в день",
     "welcome_text": "👋 Приветствие ({name} = имя)",
     "rules_text": "📋 Правила и тарифы",
+    "faq_text": "❓ Текст FAQ",
+    "support_text": "📞 Текст поддержки",
     "btn_catalog": "🗂 Кнопка «Каталог»", "btn_payout": "💰 Кнопка «Подать заявку»",
     "btn_my_payouts": "📊 Кнопка «Мои заявки»", "btn_rules": "📋 Кнопка «Правила»",
     "title_main": "👋 Заголовок главного меню",
@@ -128,6 +161,10 @@ LABELS = {
     "title_my_payouts": "📊 Заголовок «Мои заявки»",
     "title_rules": "📋 Заголовок правил",
     "title_admin": "🛠 Заголовок админки",
+    "news_url": "📢 URL канала новостей",
+    "support_username": "📞 Username поддержки",
+    "stars_url": "⭐ Ссылка на покупку звёзд",
+    "stars_price_rub": "⭐ Цена 1 звезды (₽)",
     "log_chat_id": "🎯 ID группы для логов",
     "log_topic_payouts": "💰 ID темы «Заявки»",
     "log_topic_banners": "🗂 ID темы «Баннеры»",
@@ -188,6 +225,17 @@ def init_db():
         CREATE TABLE IF NOT EXISTS fsm_state (
             chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, bot_id INTEGER NOT NULL,
             state TEXT, data BLOB, PRIMARY KEY (chat_id, user_id, bot_id));
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT, full_name TEXT,
+            referred_by INTEGER, stars INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER NOT NULL,
+            referred_id INTEGER NOT NULL UNIQUE,
+            bonus_paid INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
 
 
@@ -288,6 +336,50 @@ def adm_del(uid):  _x("DELETE FROM admins WHERE user_id=?", (uid,))
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS or uid in adm_db()
 
+
+# --- users / referrals ---
+def u_ensure(uid, username=None, full_name=None, referred_by=None):
+    row = _one("SELECT user_id FROM users WHERE user_id=?", (uid,))
+    if row:
+        _x("UPDATE users SET username=?, full_name=? WHERE user_id=?",
+           (username, full_name, uid))
+        return False
+    _x("INSERT INTO users(user_id,username,full_name,referred_by) VALUES(?,?,?,?)",
+       (uid, username, full_name, referred_by))
+    return True
+
+def u_get(uid):
+    return _one("SELECT * FROM users WHERE user_id=?", (uid,))
+
+def u_stars_add(uid, amount):
+    _x("UPDATE users SET stars = stars + ? WHERE user_id=?", (amount, uid))
+
+def ref_count(uid):
+    return _one("SELECT COUNT(*) c FROM referrals WHERE referrer_id=?", (uid,))["c"]
+
+def ref_add(referrer_id, referred_id):
+    if referrer_id == referred_id:
+        return False
+    if _one("SELECT 1 FROM referrals WHERE referred_id=?", (referred_id,)):
+        return False
+    _x("INSERT INTO referrals(referrer_id,referred_id) VALUES(?,?)",
+       (referrer_id, referred_id))
+    return True
+
+def ref_list(uid):
+    return _all(
+        "SELECT r.*, u.username, u.full_name FROM referrals r "
+        "LEFT JOIN users u ON u.user_id = r.referred_id "
+        "WHERE r.referrer_id=? ORDER BY r.id DESC LIMIT 20", (uid,))
+
+def ref_first_unpaid(referred_id):
+    return _one("SELECT * FROM referrals WHERE referred_id=? AND bonus_paid=0",
+                (referred_id,))
+
+def ref_mark_paid(rid):
+    _x("UPDATE referrals SET bonus_paid=1 WHERE id=?", (rid,))
+
+
 def valid_link(link: str) -> bool:
     try:
         p = urlparse(link)
@@ -384,7 +476,13 @@ def kb(*rows, back=None, cancel=None) -> InlineKeyboardMarkup:
     for row in rows:
         if isinstance(row, tuple):
             row = [row]
-        buttons.append([InlineKeyboardButton(text=t_, callback_data=d) for t_, d in row])
+        line = []
+        for t_, d in row:
+            if isinstance(d, str) and (d.startswith("http://") or d.startswith("https://")):
+                line.append(InlineKeyboardButton(text=t_, url=d))
+            else:
+                line.append(InlineKeyboardButton(text=t_, callback_data=d))
+        buttons.append(line)
     if back:
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back)])
     if cancel:
@@ -474,11 +572,13 @@ class LogMW(BaseMiddleware):
 # KEYBOARDS (semantic)
 # =========================================================
 def user_menu() -> InlineKeyboardMarkup:
+    stars_url = s("stars_url").strip() or "https://t.me/telegram"
     return kb(
-        (s("btn_catalog"), "cats"),
-        (s("btn_payout"), "payout_start"),
-        (s("btn_my_payouts"), "my_payouts"),
-        (s("btn_rules"), "rules"),
+        [(s("btn_catalog"), "cats"), (s("btn_payout"), "payout_start")],
+        [(s("btn_my_payouts"), "my_payouts"), ("📊 Статистика", "my_stats")],
+        [(s("btn_rules"), "rules"), ("❓ FAQ", "faq")],
+        [("🎁 Рефералка", "referral"), ("📢 Новости", "news")],
+        [("⭐ Купить звёзды", stars_url), ("📞 Поддержка", "support")],
     )
 
 def admin_menu() -> InlineKeyboardMarkup:
@@ -531,6 +631,10 @@ def settings_kb():
         ("🔢 Мин. просмотры", "adm:set:min_views"),
         ("⏳ Дней холда", "adm:set:hold_days"),
         ("🚦 Лимит заявок/день", "adm:set:daily_limit"),
+        ("📢 URL новостей", "adm:set:news_url"),
+        ("📞 Username поддержки", "adm:set:support_username"),
+        ("⭐ Ссылка на покупку звёзд", "adm:set:stars_url"),
+        ("⭐ Цена звезды (₽)", "adm:set:stars_price_rub"),
         back="adm:main",
     )
 
@@ -637,10 +741,31 @@ async def send_banner(target, b, caption=None, markup=None):
 @user.message(Command("start"))
 async def start(m: Message, state: FSMContext):
     await state.clear()
-    await log_event(
-        m.bot, "users",
-        f"👋 <b>Новый /start</b>\n👤 <code>{m.from_user.id}</code> "
-        f"@{m.from_user.username or '—'}\n🪪 {html.escape(m.from_user.full_name or '')}")
+    uid = m.from_user.id
+    uname = m.from_user.username
+    fname = m.from_user.full_name
+
+    args = (m.text or "").split(maxsplit=1)
+    referrer_id = None
+    if len(args) > 1 and args[1].startswith("ref_"):
+        try:
+            referrer_id = int(args[1][4:])
+        except ValueError:
+            referrer_id = None
+
+    existed = u_get(uid) is not None
+    u_ensure(uid, uname, fname, referrer_id if (referrer_id and not existed) else None)
+
+    if referrer_id and not existed and referrer_id != uid:
+        if ref_add(referrer_id, uid):
+            await log_event(m.bot, "users",
+                            f"🎁 <b>Новый реферал</b>\n"
+                            f"👤 Пригласил: <code>{referrer_id}</code>\n"
+                            f"🆕 Пришёл: <code>{uid}</code> @{uname or '—'}")
+
+    await log_event(m.bot, "users",
+                    f"👋 <b>Новый /start</b>\n👤 <code>{uid}</code> "
+                    f"@{uname or '—'}\n🪪 {html.escape(fname or '')}")
     await send(m, menu_text(m.from_user), reply_markup=user_menu())
 
 
@@ -661,7 +786,35 @@ async def back(cb: CallbackQuery, state: FSMContext):
 @autoclose
 async def rules_cb(cb: CallbackQuery):
     if cb.message:
-        await edit(cb.message, rules_text(), reply_markup=user_menu())
+        await edit(cb.message, rules_text(), reply_markup=kb(back="main"))
+
+
+@user.callback_query(F.data == "support")
+@autoclose
+async def support(cb: CallbackQuery):
+    if cb.message:
+        await edit(cb.message, s("support_text"), reply_markup=kb(back="main"))
+
+
+@user.callback_query(F.data == "faq")
+@autoclose
+async def faq(cb: CallbackQuery):
+    if cb.message:
+        await edit(cb.message, s("faq_text"), reply_markup=kb(back="main"))
+
+
+@user.callback_query(F.data == "news")
+@autoclose
+async def news(cb: CallbackQuery):
+    url = s("news_url").strip()
+    if not url:
+        return await cb.answer("Канал пока не указан", show_alert=True)
+    if cb.message:
+        await edit(cb.message,
+                   f"📢 <b>НОВОСТИ</b>\n{HR}\n\n"
+                   f"Все обновления программы — в канале:\n"
+                   f"👉 {html.escape(url)}",
+                   reply_markup=kb(back="main"))
 
 
 @user.callback_query(F.data == "cats")
@@ -701,23 +854,13 @@ async def banner(cb: CallbackQuery):
         return await cb.answer("Не найдено", show_alert=True)
     cap = (f"🖼 <b>{html.escape(b['title'])}</b>\n{HR}\n"
            f"📁 Категория: <i>{html.escape(b['category'])}</i>\n\n"
-           "Скачай файл 👇")
-    markup = kb(("📥 Скачать файл", f"dl:{b['id']}"),
-                back=f"cat:{b['category']}")
+           "Файл выше — сохрани и используй 👇")
+    markup = kb(("⬅️ К баннерам", f"cat:{b['category']}"),
+                ("🏠 В меню", "main"))
     await send_banner(cb.message, b, cap, markup)
-
-
-@user.callback_query(F.data.startswith("dl:"))
-@autoclose
-async def dl(cb: CallbackQuery):
-    b = b_get(int(cb.data.split(":", 1)[1]))
-    if not b:
-        return await cb.answer("Не найдено", show_alert=True)
-    await send_banner(cb.message, b, caption=f"📥 {b['title']}")
     await log_event(cb.bot, "banners",
-                    f"📥 <b>Скачан баннер</b>\n🖼 #{b['id']} «{html.escape(b['title'])}»\n"
+                    f"📥 <b>Открыт баннер</b>\n🖼 #{b['id']} «{html.escape(b['title'])}»\n"
                     f"👤 <code>{cb.from_user.id}</code> @{cb.from_user.username or '—'}")
-    await cb.answer("Файл отправлен")
 
 
 @user.callback_query(F.data == "my_payouts")
@@ -740,7 +883,62 @@ async def my_payouts(cb: CallbackQuery):
     text_ = "\n".join(body)
     if len(text_) > 4000:
         text_ = text_[:4000] + "\n<i>…список обрезан</i>"
-    await edit(cb.message, text_, reply_markup=user_menu())
+    await edit(cb.message, text_, reply_markup=kb(back="main"))
+
+
+@user.callback_query(F.data == "my_stats")
+@autoclose
+async def my_stats(cb: CallbackQuery):
+    uid = cb.from_user.id
+    rows = _all("SELECT status, COUNT(*) c FROM payouts WHERE user_id=? GROUP BY status", (uid,))
+    p = {r["status"]: r["c"] for r in rows}
+    total_views = _one(
+        "SELECT COALESCE(SUM(views_claim),0) s FROM payouts WHERE user_id=?", (uid,))["s"]
+    u = u_get(uid)
+    stars = u["stars"] if u else 0
+    body = (f"📊 <b>ТВОЯ СТАТИСТИКА</b>\n{HR}\n"
+            f"⏳ На проверке: <b>{p.get('pending', 0)}</b>\n"
+            f"✅ Одобрено: <b>{p.get('approved', 0)}</b>\n"
+            f"💰 Выплачено: <b>{p.get('paid', 0)}</b>\n"
+            f"❌ Отклонено: <b>{p.get('rejected', 0)}</b>\n"
+            f"{HR}\n"
+            f"👀 Заявлено просмотров: <b>{total_views:,}</b>\n"
+            f"🎁 Приглашено друзей: <b>{ref_count(uid)}</b>\n"
+            f"⭐ Звёзд: <b>{stars}</b>")
+    if cb.message:
+        await edit(cb.message, body, reply_markup=kb(back="main"))
+
+
+@user.callback_query(F.data == "referral")
+@autoclose
+async def referral(cb: CallbackQuery):
+    uid = cb.from_user.id
+    bot_info = await cb.bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
+    count = ref_count(uid)
+    rows = ref_list(uid)
+    lines = [
+        "🎁 <b>РЕФЕРАЛЬНАЯ ПРОГРАММА</b>",
+        HR,
+        "",
+        "Приглашай друзей — получай бонусы.",
+        "За каждого друга, который получит первую одобренную заявку — <b>+50 ⭐</b>.",
+        "",
+        f"👥 Приглашено: <b>{count}</b>",
+        "",
+        "<b>Твоя ссылка:</b>",
+        f"<code>{link}</code>",
+        "",
+        "👇 Скопируй и отправь другу:",
+    ]
+    if rows:
+        lines.append("")
+        lines.append("<b>Последние:</b>")
+        for r in rows[:5]:
+            name = r["full_name"] or r["username"] or f"id{r['referred_id']}"
+            lines.append(f"• {html.escape(name)}")
+    if cb.message:
+        await edit(cb.message, "\n".join(lines), reply_markup=kb(back="main"))
 
 
 # =========================================================
@@ -999,6 +1197,8 @@ async def stats(cb: CallbackQuery):
             f"💰 Выплачено: <b>{p.get('paid', 0)}</b>\n"
             f"❌ Отклонено: <b>{p.get('rejected', 0)}</b>\n"
             f"🚫 В ЧС: <b>{_one('SELECT COUNT(*) c FROM blacklist')['c']}</b>\n"
+            f"👥 Юзеров: <b>{_one('SELECT COUNT(*) c FROM users')['c']}</b>\n"
+            f"🎁 Рефералов: <b>{_one('SELECT COUNT(*) c FROM referrals')['c']}</b>\n"
             f"👤 Админов: <b>{len(set(ADMIN_IDS) | set(adm_db()))}</b>")
     await edit(cb.message, body, reply_markup=back_admin())
     await cb.answer()
@@ -1090,6 +1290,19 @@ async def approve(cb: CallbackQuery):
     await _notify_user(cb.bot, r["user_id"],
                        f"✅ <b>Заявка #{pid} одобрена!</b>\n{HR}\n"
                        f"Выплата после {hold}-дневного холда.")
+
+    ref = ref_first_unpaid(r["user_id"])
+    if ref:
+        u_stars_add(ref["referrer_id"], 50)
+        ref_mark_paid(ref["id"])
+        await _notify_user(cb.bot, ref["referrer_id"],
+                           f"🎁 <b>Бонус за друга!</b>\n{HR}\n"
+                           f"Твой реферал получил первую одобренную заявку.\n"
+                           f"Тебе начислено <b>+50 ⭐</b>.")
+        await log_event(cb.bot, "users",
+                        f"🎁 <b>Реферальный бонус</b>\n"
+                        f"👤 <code>{ref['referrer_id']}</code> → +50 ⭐\n"
+                        f"🆕 За <code>{r['user_id']}</code>")
     await cb.answer("Одобрено")
 
 
@@ -1388,7 +1601,7 @@ async def log_test(cb: CallbackQuery):
     await cb.answer(f"Отправил тесты в {sent} топиков")
 
 
-# --- настройки чисел ---
+# --- настройки чисел/ссылок ---
 @adm.callback_query(F.data == "adm:settings")
 @admin_only
 async def settings_menu(cb: CallbackQuery, state: FSMContext):
@@ -1397,7 +1610,10 @@ async def settings_menu(cb: CallbackQuery, state: FSMContext):
                f"⚙️ <b>НАСТРОЙКИ</b>\n{HR}\n"
                f"🔢 Мин. просмотры: <b>{s('min_views')}</b>\n"
                f"⏳ Дней холда: <b>{s('hold_days')}</b>\n"
-               f"🚦 Лимит заявок/день: <b>{s('daily_limit')}</b>\n\n"
+               f"🚦 Лимит заявок/день: <b>{s('daily_limit')}</b>\n"
+               f"📢 Новости: <code>{html.escape(s('news_url'))}</code>\n"
+               f"📞 Поддержка: <code>{html.escape(s('support_username'))}</code>\n"
+               f"⭐ Звёзды: <code>{html.escape(s('stars_url'))}</code>\n\n"
                "Тапни на параметр, чтобы изменить 👇",
                reply_markup=settings_kb())
     await cb.answer()
@@ -1424,11 +1640,16 @@ async def set_finish(m: Message, state: FSMContext):
     d = await state.get_data()
     key = d["set_key"]
     value = (m.text or "").strip()
-    if key in ("min_views", "hold_days", "daily_limit"):
+
+    if key in ("min_views", "hold_days", "daily_limit", "stars_price_rub"):
         try:
             int(value)
         except ValueError:
             return await m.answer("Нужно целое число.")
+    if key in ("news_url", "stars_url"):
+        if not value.startswith(("http://", "https://")):
+            return await m.answer("Ссылка должна начинаться с http:// или https://")
+
     old = s(key)
     s_set(key, value)
     await state.clear()
