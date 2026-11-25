@@ -1,5 +1,5 @@
 """
-VPN Payout Bot — compact rewrite.
+VPN Payout Bot — compact rewrite (без рекламного текста).
 """
 import asyncio
 import html
@@ -166,7 +166,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS banners (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_id TEXT NOT NULL, file_type TEXT NOT NULL DEFAULT 'document',
-            title TEXT NOT NULL, category TEXT NOT NULL, caption TEXT DEFAULT '',
+            title TEXT NOT NULL, category TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS payouts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,9 +222,9 @@ def t(key: str, default: str = "", **kw) -> str:
 
 
 # --- banners ---
-def b_add(fid, ftype, title, category, caption):
-    return _x("INSERT INTO banners(file_id,file_type,title,category,caption) "
-              "VALUES(?,?,?,?,?)", (fid, ftype, title, category, caption)).lastrowid
+def b_add(fid, ftype, title, category):
+    return _x("INSERT INTO banners(file_id,file_type,title,category) "
+              "VALUES(?,?,?,?)", (fid, ftype, title, category)).lastrowid
 
 def b_cats():
     return [r["category"] for r in
@@ -390,14 +390,6 @@ def kb(*rows, back=None, cancel=None) -> InlineKeyboardMarkup:
     if cancel:
         buttons.append([InlineKeyboardButton(text="❌ Отменить", callback_data=cancel)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def grid(items, prefix: str, back: str = "main", cols: int = 1, label=None):
-    label = label or (lambda x: str(x))
-    rows = []
-    for i in range(0, len(items), cols):
-        chunk = items[i:i + cols]
-        rows.append([(label(it), f"{prefix}:{getattr(it, 'id', it)}") for it in chunk])
-    return kb(*rows, back=back)
 
 
 # --- decorators ---
@@ -606,7 +598,7 @@ class PayoutFSM(StatesGroup):
 
 class AdminFSM(StatesGroup):
     set_value = State(); style_edit = State(); log_value = State()
-    b_file = State(); b_title = State(); b_cat = State(); b_caption = State()
+    b_file = State(); b_title = State(); b_cat = State()
     reject_reason = State(); bl_user = State(); bl_reason = State(); adm_user = State()
 
 
@@ -640,10 +632,6 @@ def rules_text() -> str:
 async def send_banner(target, b, caption=None, markup=None):
     fn = target.answer_photo if b["file_type"] == "photo" else target.answer_document
     return await fn(b["file_id"], caption=caption, reply_markup=markup)
-
-async def send_file(target, fid, ftype, cap):
-    fn = target.answer_photo if ftype == "photo" else target.answer_document
-    await fn(fid, caption=cap)
 
 
 @user.message(Command("start"))
@@ -683,9 +671,11 @@ async def cats(cb: CallbackQuery):
     if not items:
         return await cb.answer("Каталог пуст", show_alert=True)
     if cb.message:
+        rows = [[(f"📁 {c}", f"cat:{c}")] for c in items]
+        rows.append([("⬅️ В меню", "main")])
         await edit(cb.message,
                    f"{t('title_catalog')}\n{HR}\n\nВыбери категорию 👇",
-                   reply_markup=grid(items, "cat", label=lambda c: f"📁 {c}"))
+                   reply_markup=kb(*rows))
 
 
 @user.callback_query(F.data.startswith("cat:"))
@@ -695,11 +685,12 @@ async def category(cb: CallbackQuery):
     items = b_by_cat(cat)
     if not items:
         return await cb.answer("В категории пусто", show_alert=True)
+    rows = [[(f"🖼 {b['title']}", f"banner:{b['id']}")] for b in items]
+    rows.append([("⬅️ К категориям", "cats")])
     await edit(cb.message,
                f"📁 <b>КАТЕГОРИЯ:</b> {html.escape(cat)}\n{HR}\n\n"
                f"Баннеров: <b>{len(items)}</b>\nВыбери баннер 👇",
-               reply_markup=grid(items, "banner", back="cats",
-                                 label=lambda b: f"🖼 {b['title']}"))
+               reply_markup=kb(*rows))
 
 
 @user.callback_query(F.data.startswith("banner:"))
@@ -710,11 +701,9 @@ async def banner(cb: CallbackQuery):
         return await cb.answer("Не найдено", show_alert=True)
     cap = (f"🖼 <b>{html.escape(b['title'])}</b>\n{HR}\n"
            f"📁 Категория: <i>{html.escape(b['category'])}</i>\n\n"
-           "Скачай файл или скопируй текст 👇")
-    markup = kb(
-        ("📥 Скачать файл", f"dl:{b['id']}"),
-        ("📋 Скопировать текст", f"copy:{b['id']}"),
-        back=f"cat:{b['category']}")
+           "Скачай файл 👇")
+    markup = kb(("📥 Скачать файл", f"dl:{b['id']}"),
+                back=f"cat:{b['category']}")
     await send_banner(cb.message, b, cap, markup)
 
 
@@ -729,18 +718,6 @@ async def dl(cb: CallbackQuery):
                     f"📥 <b>Скачан баннер</b>\n🖼 #{b['id']} «{html.escape(b['title'])}»\n"
                     f"👤 <code>{cb.from_user.id}</code> @{cb.from_user.username or '—'}")
     await cb.answer("Файл отправлен")
-
-
-@user.callback_query(F.data.startswith("copy:"))
-@autoclose
-async def copy(cb: CallbackQuery):
-    b = b_get(int(cb.data.split(":", 1)[1]))
-    if not b:
-        return await cb.answer("Не найдено", show_alert=True)
-    await send(cb.message,
-               f"📋 <b>Рекламный текст</b>\n{HR}\n\n"
-               f"<code>{html.escape(b['caption'] or 'Текст не добавлен.')}</code>")
-    await cb.answer("Тапни, чтобы скопировать")
 
 
 @user.callback_query(F.data == "my_payouts")
@@ -1077,7 +1054,8 @@ async def pmedia(cb: CallbackQuery):
         if not fid:
             continue
         try:
-            await send_file(cb.message, fid, ft, cap)
+            fn = cb.message.answer_photo if ft == "photo" else cb.message.answer_document
+            await fn(fid, caption=cap)
         except Exception as e:
             logger.warning(f"Не отправил файл для #{pid}: {e}")
             await cb.message.answer(f"⚠️ Не удалось отправить {cap}")
@@ -1544,22 +1522,13 @@ async def banner_cat(m: Message, state: FSMContext):
         return await m.answer("Категория не может быть пустой.")
     if len(cat.encode("utf-8")) > 55:
         return await m.answer("⚠️ Категория слишком длинная (>55 байт). Короче.")
-    await state.update_data(category=cat)
-    await state.set_state(AdminFSM.b_caption)
-    await m.answer("Рекламный текст для копирования:", reply_markup=cancel_admin())
-
-
-@adm.message(StateFilter(AdminFSM.b_caption))
-@admin_only
-async def banner_caption(m: Message, state: FSMContext):
     d = await state.get_data()
-    bid = b_add(d["file_id"], d["file_type"], d["title"],
-                d["category"], (m.text or "").strip())
+    bid = b_add(d["file_id"], d["file_type"], d["title"], cat)
     await state.clear()
     await m.answer("✅ Баннер добавлен.", reply_markup=admin_menu())
     await log_event(m.bot, "banners",
                     f"➕ <b>Баннер добавлен</b>\n🖼 #{bid} «{html.escape(d['title'])}»\n"
-                    f"📁 {html.escape(d['category'])}\n"
+                    f"📁 {html.escape(cat)}\n"
                     f"👨‍💼 Админ: <code>{m.from_user.id}</code>")
 
 
