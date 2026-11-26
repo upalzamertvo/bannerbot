@@ -1,11 +1,11 @@
 """
-VPN Payout Bot — compact rewrite.
-- Рекламный текст убран, "Скачать файл" убран
-- Поддержка: обращение в ЛС админа, ответ через reply в ЛС бота,
-  дубль в лог-топик "support" (только история)
-- Обязательная подписка: админ добавляет/убирает каналы
-- Купить звёзды: URL-кнопка
-- Новости: URL-кнопка
+VPN Payout Bot — Wcoins edition.
+- Wcoins: 10 Wcoins = 1 USDT
+- Начисление: 10 Wcoins за 1000 просмотров, бонусы за рефералов
+- Вывод USDT вручную через чек @CryptoBot
+- Отдельный лог-топик для выводов
+- Обязательная подписка
+- Поддержка: ЛС админа + лог в топик
 """
 import asyncio
 import html
@@ -48,8 +48,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = _ints(os.getenv("ADMIN_IDS", ""))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
+# Фиксированные константы Wcoins
+WCOIN_RATE = 10            # 10 Wcoins = 1 USDT
+WCOIN_PER_1K_VIEWS = 10    # 10 Wcoins за 1000 просмотров
+WCOIN_MIN_WITHDRAW = 10    # минимум 10 Wcoins = 1 USDT
+WCOIN_MAX_WITHDRAW = 100000 # максимум 100000 Wcoins = 10000 USDT (защита)
+
 LOG_CATS = {
     "payouts":  ("💰", "Заявки"),
+    "withdraw": ("📤", "Вывод Wcoins"),
     "banners":  ("🗂", "Баннеры"),
     "users":    ("👤", "Пользователи"),
     "settings": ("⚙️", "Настройки"),
@@ -62,6 +69,12 @@ STATUSES = {
     "approved": "✅ Одобрена (холд)",
     "rejected": "❌ Отклонена",
     "paid":     "💰 Выплачена",
+}
+
+WD_STATUSES = {
+    "pending":  "⏳ В обработке",
+    "paid":     "✅ Выплачен",
+    "rejected": "❌ Отклонён",
 }
 
 DEFAULTS = {
@@ -77,7 +90,9 @@ DEFAULTS = {
     "welcome_text": (
         "👋 Привет, <b>{name}</b>!\n\n"
         "Это бот программы выплат.\n"
-        "Здесь ты берёшь баннеры и получаешь оплату за просмотры.\n\n"
+        "Смотри видео, вставляй баннер, получай Wcoins за просмотры.\n\n"
+        "💰 <b>10 Wcoins за 1000 просмотров</b>\n"
+        "💵 <b>10 Wcoins = 1 USDT</b>\n\n"
         "👇 Выбери действие:"
     ),
     "rules_text": (
@@ -99,14 +114,14 @@ DEFAULTS = {
         "• Виден минимум 5 сек\n"
         "• Вставлен в паузе: от 30 сек до 90%\n\n"
         "<b>⚙️ Как это работает</b>\n"
-        "Заявка → проверка 3–5 дней → одобрение → холд → выплата\n\n"
+        "Заявка → проверка 3–5 дней → одобрение → холд → Wcoins на баланс\n\n"
+        "<b>💰 Wcoins</b>\n"
+        "• 10 Wcoins за 1000 просмотров\n"
+        "• 10 Wcoins = 1 USDT\n"
+        "• Вывод в USDT через @CryptoBot (чек)\n"
+        "• Минимум вывода: 10 Wcoins (1 USDT)\n\n"
         "<b>🚫 За что бан</b>\n"
-        "Накрутка, обрезка баннера, удаление ролика — без выплат.\n\n"
-        "<b>💰 Тарифы за просмотры</b>\n"
-        "• 10 000 — базовая ставка\n"
-        "• 50 000 — +50%\n"
-        "• 100 000 — +100%\n"
-        "• 500 000 — индивидуально"
+        "Накрутка, обрезка баннера, удаление ролика — без выплат."
     ),
     "support_text": (
         "📞 <b>ПОДДЕРЖКА</b>\n"
@@ -118,22 +133,25 @@ DEFAULTS = {
     "faq_text": (
         "❓ <b>ЧАСТЫЕ ВОПРОСЫ</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "<b>Когда придёт выплата?</b>\n"
-        "После одобрения — холд 14 дней, потом выплата.\n\n"
-        "<b>Почему отклонили?</b>\n"
-        "Причина всегда указана в «Моих заявках».\n\n"
-        "<b>Можно ли подать повторно?</b>\n"
-        "Да, если исправил ошибку. Ссылка должна быть другая.\n\n"
-        "<b>Что такое холд?</b>\n"
-        "Период проверки просмотров после одобрения.\n\n"
-        "<b>Как вставить баннер?</b>\n"
-        "Смотри гайд в канале новостей."
+        "<b>Что такое Wcoins?</b>\n"
+        "Внутренняя валюта. 10 Wcoins = 1 USDT.\n\n"
+        "<b>Как получить Wcoins?</b>\n"
+        "10 Wcoins за каждые 1000 просмотров одобренной заявки.\n\n"
+        "<b>Как вывести?</b>\n"
+        "Кошелёк → Вывести USDT → админ отправит чек через @CryptoBot.\n\n"
+        "<b>Минимум вывода?</b>\n"
+        "10 Wcoins (1 USDT).\n\n"
+        "<b>Почему нужен @CryptoBot?</b>\n"
+        "Через него приходят чеки в USDT. Запусти его хотя бы раз.\n\n"
+        "<b>Когда придёт вывод?</b>\n"
+        "В течение 24 часов после запроса."
     ),
     "news_url": "https://t.me/wstarsforsale",
     "stars_url": "https://t.me/wsquadstars_bot",
     "support_chat_id": "",
     "log_enabled": "0", "log_chat_id": "",
-    "log_topic_payouts": "", "log_topic_banners": "", "log_topic_users": "",
+    "log_topic_payouts": "", "log_topic_withdraw": "",
+    "log_topic_banners": "", "log_topic_users": "",
     "log_topic_settings": "", "log_topic_errors": "", "log_topic_support": "",
 }
 
@@ -167,6 +185,7 @@ LABELS = {
     "support_chat_id": "📞 ID получателя обращений",
     "log_chat_id": "🎯 ID группы для логов",
     "log_topic_payouts": "💰 ID темы «Заявки»",
+    "log_topic_withdraw": "📤 ID темы «Вывод Wcoins»",
     "log_topic_banners": "🗂 ID темы «Баннеры»",
     "log_topic_users": "👤 ID темы «Пользователи»",
     "log_topic_settings": "⚙️ ID темы «Настройки»",
@@ -229,7 +248,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT, full_name TEXT,
-            referred_by INTEGER, stars INTEGER DEFAULT 0,
+            referred_by INTEGER, wcoins INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS referrals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -237,6 +256,22 @@ def init_db():
             referred_id INTEGER NOT NULL UNIQUE,
             bonus_paid INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS wcoin_tx (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            reason TEXT,
+            ref_id INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS withdraw_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            wcoins INTEGER NOT NULL,
+            status TEXT DEFAULT 'pending',
+            admin_id INTEGER,
+            reason TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TEXT);
         CREATE TABLE IF NOT EXISTS channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id TEXT NOT NULL UNIQUE,
@@ -244,6 +279,13 @@ def init_db():
             invite_link TEXT,
             added_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
+    # Миграция: если старая таблица users без wcoins
+    try:
+        cols = [r["name"] for r in _all("PRAGMA table_info(users)")]
+        if "wcoins" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN wcoins INTEGER DEFAULT 0")
+    except Exception:
+        pass
 
 
 # --- settings ---
@@ -358,9 +400,6 @@ def u_ensure(uid, username=None, full_name=None, referred_by=None):
 def u_get(uid):
     return _one("SELECT * FROM users WHERE user_id=?", (uid,))
 
-def u_stars_add(uid, amount):
-    _x("UPDATE users SET stars = stars + ? WHERE user_id=?", (amount, uid))
-
 def ref_count(uid):
     return _one("SELECT COUNT(*) c FROM referrals WHERE referrer_id=?", (uid,))["c"]
 
@@ -387,7 +426,64 @@ def ref_mark_paid(rid):
     _x("UPDATE referrals SET bonus_paid=1 WHERE id=?", (rid,))
 
 
-# --- channels (обязательная подписка) ---
+# --- Wcoins ---
+def wc_balance(uid: int) -> int:
+    u = _one("SELECT wcoins FROM users WHERE user_id=?", (uid,))
+    return u["wcoins"] if u else 0
+
+def wc_add(uid: int, amount: int, reason: str, ref_id: int = None):
+    _x("UPDATE users SET wcoins = wcoins + ? WHERE user_id=?", (amount, uid))
+    _x("INSERT INTO wcoin_tx(user_id, amount, reason, ref_id) VALUES(?,?,?,?)",
+       (uid, amount, reason, ref_id))
+
+def wc_spend(uid: int, amount: int, reason: str, ref_id: int = None) -> bool:
+    if wc_balance(uid) < amount:
+        return False
+    _x("UPDATE users SET wcoins = wcoins - ? WHERE user_id=?", (amount, uid))
+    _x("INSERT INTO wcoin_tx(user_id, amount, reason, ref_id) VALUES(?,?,?,?)",
+       (uid, -amount, reason, ref_id))
+    return True
+
+def wc_history(uid: int, limit: int = 20):
+    return _all(
+        "SELECT * FROM wcoin_tx WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        (uid, limit))
+
+
+# --- withdraws ---
+def wd_create(uid: int, wcoins: int) -> int:
+    return _x("INSERT INTO withdraw_requests(user_id,wcoins) VALUES(?,?)",
+              (uid, wcoins)).lastrowid
+
+def wd_get(rid: int):
+    return _one("SELECT * FROM withdraw_requests WHERE id=?", (rid,))
+
+def wd_list(status: str = "pending", limit: int = 50):
+    return _all("SELECT * FROM withdraw_requests WHERE status=? "
+                "ORDER BY id DESC LIMIT ?", (status, limit))
+
+def wd_user(uid: int, limit: int = 10):
+    return _all("SELECT * FROM withdraw_requests WHERE user_id=? "
+                "ORDER BY id DESC LIMIT ?", (uid, limit))
+
+def wd_user_pending(uid: int):
+    return _one("SELECT * FROM withdraw_requests WHERE user_id=? AND status='pending'",
+                (uid,))
+
+def wd_set(rid: int, status: str, admin_id: int, reason: str = None):
+    _x("UPDATE withdraw_requests SET status=?,admin_id=?,reason=?,"
+       "reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
+       (status, admin_id, reason, rid))
+
+
+def wcoins_to_usdt_str(wcoins: int) -> str:
+    usdt = wcoins / WCOIN_RATE
+    if usdt == int(usdt):
+        return str(int(usdt))
+    return f"{usdt:.2f}"
+
+
+# --- channels ---
 def ch_all():
     return _all("SELECT * FROM channels ORDER BY id")
 
@@ -406,7 +502,6 @@ def ch_get(cid: int):
 
 
 async def check_sub(bot: Bot, user_id: int) -> list[dict]:
-    """Возвращает каналы, на которые юзер НЕ подписан."""
     not_subbed = []
     for ch in ch_all():
         try:
@@ -508,7 +603,6 @@ async def edit(msg, text_: str, **kw):
         raise
 
 
-# --- keyboard factories ---
 def kb(*rows, back=None, cancel=None) -> InlineKeyboardMarkup:
     buttons = []
     for row in rows:
@@ -537,7 +631,6 @@ def subscribe_kb(channels: list[dict]) -> InlineKeyboardMarkup:
     return kb(*rows)
 
 
-# --- decorators ---
 def admin_only(func):
     @wraps(func)
     async def wrapper(event, *a, **kw):
@@ -656,22 +749,25 @@ class SubscriptionMW(BaseMiddleware):
 
 
 # =========================================================
-# KEYBOARDS (semantic)
+# KEYBOARDS
 # =========================================================
 def user_menu() -> InlineKeyboardMarkup:
     stars_url = s("stars_url").strip() or "https://t.me/wsquadstars_bot"
     return kb(
         [(s("btn_catalog"), "cats"), (s("btn_payout"), "payout_start")],
-        [(s("btn_my_payouts"), "my_payouts"), ("📊 Статистика", "my_stats")],
-        [(s("btn_rules"), "rules"), ("❓ FAQ", "faq")],
-        [("🎁 Рефералка", "referral"), ("📢 Новости", "news")],
+        [(s("btn_my_payouts"), "my_payouts"), ("💰 Кошелёк", "wallet")],
+        [("📊 Статистика", "my_stats"), ("🎁 Рефералка", "referral")],
+        [("📢 Новости", "news"), ("❓ FAQ", "faq")],
         [("⭐ Купить звёзды", stars_url), ("📞 Поддержка", "support")],
+        [(s("btn_rules"), "rules")],
     )
 
 def admin_menu() -> InlineKeyboardMarkup:
     return kb(
         ("📊 Статистика", "adm:stats"),
         ("📋 Заявки", "adm:payouts:pending"),
+        ("📤 Выводы Wcoins", "adm:withdraws"),
+        ("🪙 Начислить Wcoins", "adm:wc_add"),
         ("🗂 Баннеры", "adm:banners:1"),
         ("📢 Каналы (подписка)", "adm:channels"),
         ("🎨 Оформление", "adm:style:menu"),
@@ -706,6 +802,7 @@ def log_menu_kb():
         (f"{'🟢' if on else '🔴'} Логи: {'вкл' if on else 'выкл'}", "adm:log:toggle"),
         (f"🎯 Группа: {chat}", "adm:log:set:log_chat_id"),
         (f"{mark('log_topic_payouts')} 💰 Тема «Заявки»", "adm:log:set:log_topic_payouts"),
+        (f"{mark('log_topic_withdraw')} 📤 Тема «Выводы»", "adm:log:set:log_topic_withdraw"),
         (f"{mark('log_topic_banners')} 🗂 Тема «Баннеры»", "adm:log:set:log_topic_banners"),
         (f"{mark('log_topic_users')} 👤 Тема «Юзеры»", "adm:log:set:log_topic_users"),
         (f"{mark('log_topic_settings')} ⚙️ Тема «Настройки»", "adm:log:set:log_topic_settings"),
@@ -793,10 +890,17 @@ class AdminFSM(StatesGroup):
     b_file = State(); b_title = State(); b_cat = State()
     reject_reason = State(); bl_user = State(); bl_reason = State(); adm_user = State()
     ch_id = State(); ch_title = State(); ch_link = State()
+    wc_user = State(); wc_amount = State()
+    wd_reason = State()
 
 
 class SupportFSM(StatesGroup):
     message = State()
+
+
+class WithdrawFSM(StatesGroup):
+    amount = State()
+    confirm = State()
 
 
 STEPS = [
@@ -807,7 +911,7 @@ STEPS = [
     ("banner_shot", "Кадр с баннером", "Скриншот кадра из видео, где виден вставленный баннер."),
     ("banner_video", "Запись вставки", "Запиши 10–20 сек экрана с вставкой баннера.\nНе можешь — пропусти."),
     ("comments", "Комментарии", "Скриншот открытых комментариев под видео."),
-    ("requisites", "Реквизиты", "Куда переводить выплату: карта / СБП / крипта."),
+    ("requisites", "Реквизиты", "Куда переводить USDT (аккаунт @CryptoBot — есть/нет)."),
 ]
 
 def step_text(i: int) -> str:
@@ -905,6 +1009,179 @@ async def back(cb: CallbackQuery, state: FSMContext):
 async def rules_cb(cb: CallbackQuery):
     if cb.message:
         await edit(cb.message, rules_text(), reply_markup=kb(back="main"))
+
+
+# --- кошелёк ---
+@user.callback_query(F.data == "wallet")
+@autoclose
+async def wallet(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    uid = cb.from_user.id
+    balance = wc_balance(uid)
+    usdt_str = wcoins_to_usdt_str(balance)
+    body = (f"💰 <b>WCOINS КОШЕЛЁК</b>\n{HR}\n"
+            f"Баланс: <b>{balance} Wcoins</b>\n"
+            f"≈ <b>{usdt_str} USDT</b>\n"
+            f"Курс: {WCOIN_RATE} Wcoins = 1 USDT\n"
+            f"Мин. вывод: {WCOIN_MIN_WITHDRAW} Wcoins")
+    markup = kb(
+        ("📤 Вывести USDT", "withdraw_start"),
+        ("📜 История", "wcoin_history"),
+        ("📋 Мои выводы", "my_withdraws"),
+        back="main")
+    if cb.message:
+        await edit(cb.message, body, reply_markup=markup)
+
+
+@user.callback_query(F.data == "wcoin_history")
+@autoclose
+async def wcoin_history(cb: CallbackQuery):
+    uid = cb.from_user.id
+    rows = wc_history(uid, 20)
+    if not rows:
+        return await cb.answer("История пуста", show_alert=True)
+    labels = {
+        "referral": "🎁 Реферал",
+        "manual": "👨‍💼 Начисление",
+        "withdraw": "📤 Вывод",
+        "refund": "↩️ Возврат",
+        "payout": "👀 За просмотры",
+    }
+    lines = [f"📜 <b>ИСТОРИЯ WCOINS</b>\n{HR}\n"]
+    for r in rows:
+        sign = "＋" if r["amount"] > 0 else "－"
+        label = labels.get(r["reason"], r["reason"] or "—")
+        lines.append(f"{sign} <b>{abs(r['amount'])}</b> — {label}\n"
+                     f"  <i>{r['created_at'][:16]}</i>")
+    text_ = "\n".join(lines)
+    if len(text_) > 4000:
+        text_ = text_[:4000] + "\n<i>…обрезано</i>"
+    await edit(cb.message, text_, reply_markup=kb(back="wallet"))
+
+
+@user.callback_query(F.data == "my_withdraws")
+@autoclose
+async def my_withdraws(cb: CallbackQuery):
+    uid = cb.from_user.id
+    rows = wd_user(uid, 10)
+    if not rows:
+        return await cb.answer("У тебя нет выводов", show_alert=True)
+    lines = [f"📋 <b>МОИ ВЫВОДЫ</b>\n{HR}\n"]
+    for r in rows:
+        st = WD_STATUSES.get(r["status"], r["status"])
+        usdt = wcoins_to_usdt_str(r["wcoins"])
+        lines.append(
+            f"<b>#{r['id']}</b> — {st}\n"
+            f"🪙 {r['wcoins']} Wcoins → {usdt} USDT\n"
+            f"📅 {r['created_at'][:16]}\n"
+            + (f"📝 {html.escape(r['reason'])}\n" if r["reason"] else "")
+            + f"{'━' * 15}\n")
+    text_ = "\n".join(lines)
+    if len(text_) > 4000:
+        text_ = text_[:4000] + "\n<i>…обрезано</i>"
+    await edit(cb.message, text_, reply_markup=kb(back="wallet"))
+
+
+# --- вывод ---
+@user.callback_query(F.data == "withdraw_start")
+async def withdraw_start(cb: CallbackQuery, state: FSMContext):
+    uid = cb.from_user.id
+
+    if wd_user_pending(uid):
+        return await cb.answer("У тебя уже есть заявка на вывод. Дождись обработки.",
+                               show_alert=True)
+
+    balance = wc_balance(uid)
+    if balance < WCOIN_MIN_WITHDRAW:
+        return await cb.answer(f"Минимум {WCOIN_MIN_WITHDRAW} Wcoins для вывода",
+                               show_alert=True)
+
+    await state.set_state(WithdrawFSM.amount)
+    await state.update_data(wc_balance=balance)
+    await edit(cb.message,
+               f"📤 <b>ВЫВОД USDT</b>\n{HR}\n"
+               f"Доступно: <b>{balance} Wcoins</b>\n"
+               f"Курс: {WCOIN_RATE} Wcoins = 1 USDT\n"
+               f"Минимум: {WCOIN_MIN_WITHDRAW} Wcoins\n\n"
+               f"Сколько Wcoins вывести?",
+               reply_markup=cancel_user())
+    await cb.answer()
+
+
+@user.message(StateFilter(WithdrawFSM.amount))
+async def withdraw_amount(m: Message, state: FSMContext):
+    try:
+        amount = int((m.text or "").strip())
+    except ValueError:
+        return await m.answer("Нужно число.")
+
+    d = await state.get_data()
+    balance = d["wc_balance"]
+
+    if amount < WCOIN_MIN_WITHDRAW:
+        return await m.answer(f"Минимум {WCOIN_MIN_WITHDRAW} Wcoins.")
+    if amount > WCOIN_MAX_WITHDRAW:
+        return await m.answer(f"Максимум {WCOIN_MAX_WITHDRAW} Wcoins за раз.")
+    if amount > balance:
+        return await m.answer(f"У тебя только {balance} Wcoins.")
+
+    usdt_str = wcoins_to_usdt_str(amount)
+    await state.update_data(wc_amount=amount)
+    await state.set_state(WithdrawFSM.confirm)
+    await m.answer(
+        f"📤 <b>ПОДТВЕРДИ ВЫВОД</b>\n{HR}\n"
+        f"Списать: <b>{amount} Wcoins</b>\n"
+        f"Получишь: <b>{usdt_str} USDT</b>\n"
+        f"{HR}\n"
+        f"Админ отправит USDT <b>чеком через @CryptoBot</b>.\n"
+        f"Убедись, что ты запускал @CryptoBot — иначе чек не активируется.",
+        reply_markup=kb(
+            ("✅ Подтвердить", "withdraw_confirm"),
+            ("❌ Отмена", "cancel_fsm")))
+
+
+@user.callback_query(StateFilter(WithdrawFSM.confirm), F.data == "withdraw_confirm")
+async def withdraw_confirm(cb: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    uid = cb.from_user.id
+    amount = d.get("wc_amount")
+
+    if not amount:
+        await state.clear()
+        return await cb.answer("Сессия истекла", show_alert=True)
+
+    if wd_user_pending(uid):
+        await state.clear()
+        return await cb.answer("У тебя уже есть заявка на вывод", show_alert=True)
+
+    if not wc_spend(uid, amount, "withdraw"):
+        await state.clear()
+        return await cb.answer("Недостаточно Wcoins", show_alert=True)
+
+    rid = wd_create(uid, amount)
+    await state.clear()
+
+    usdt_str = wcoins_to_usdt_str(amount)
+    await edit(cb.message,
+               f"✅ <b>Заявка на вывод #{rid}</b>\n{HR}\n"
+               f"Списано: <b>{amount} Wcoins</b>\n"
+               f"К получению: <b>{usdt_str} USDT</b>\n\n"
+               f"Админ отправит чек через @CryptoBot в течение 24 часов.",
+               reply_markup=user_menu())
+
+    await log_event(cb.bot, "withdraw",
+                    f"📤 <b>Заявка на вывод #{rid}</b>\n{HR}\n"
+                    f"👤 <code>{uid}</code> @{cb.from_user.username or '—'}\n"
+                    f"🪙 {amount} Wcoins → {usdt_str} USDT")
+
+    if ADMIN_IDS:
+        await _notify_user(cb.bot, ADMIN_IDS[0],
+                           f"📤 <b>Новая заявка на вывод #{rid}</b>\n{HR}\n"
+                           f"👤 <code>{uid}</code> @{cb.from_user.username or '—'}\n"
+                           f"🪙 {amount} Wcoins → {usdt_str} USDT\n\n"
+                           f"Создай чек в @CryptoBot на {usdt_str} USDT и отправь юзеру.")
+
+    await cb.answer("Заявка создана")
 
 
 # --- поддержка ---
@@ -1067,10 +1344,11 @@ async def my_payouts(cb: CallbackQuery):
     lim_str = f"сегодня: <b>{today}/{lim}</b>" if lim > 0 else f"сегодня: <b>{today}</b>"
     body = [f"{t('title_my_payouts')}\n", f"{HR}\n", f"📅 {lim_str}\n", f"{HR}\n"]
     for r in rows:
+        earned = (r["views_claim"] // 1000) * WCOIN_PER_1K_VIEWS
         body.append(
             f"<b>#{r['id']}</b> — {STATUSES.get(r['status'], r['status'])}\n"
             f"🔗 {html.escape(r['link'])}\n"
-            f"👀 {r['views_claim']} просмотров"
+            f"👀 {r['views_claim']} просмотров → {earned} Wcoins"
             + (f"\n📝 Причина: {html.escape(r['reason'])}" if r["reason"] else "")
             + f"\n{'━' * 15}\n")
     text_ = "\n".join(body)
@@ -1087,8 +1365,8 @@ async def my_stats(cb: CallbackQuery):
     p = {r["status"]: r["c"] for r in rows}
     total_views = _one(
         "SELECT COALESCE(SUM(views_claim),0) s FROM payouts WHERE user_id=?", (uid,))["s"]
-    u = u_get(uid)
-    stars = u["stars"] if u else 0
+    balance = wc_balance(uid)
+    usdt_str = wcoins_to_usdt_str(balance)
     body = (f"📊 <b>ТВОЯ СТАТИСТИКА</b>\n{HR}\n"
             f"⏳ На проверке: <b>{p.get('pending', 0)}</b>\n"
             f"✅ Одобрено: <b>{p.get('approved', 0)}</b>\n"
@@ -1097,7 +1375,7 @@ async def my_stats(cb: CallbackQuery):
             f"{HR}\n"
             f"👀 Заявлено просмотров: <b>{total_views:,}</b>\n"
             f"🎁 Приглашено друзей: <b>{ref_count(uid)}</b>\n"
-            f"⭐ Звёзд: <b>{stars}</b>")
+            f"💰 Баланс: <b>{balance} Wcoins</b> (≈ {usdt_str} USDT)")
     if cb.message:
         await edit(cb.message, body, reply_markup=kb(back="main"))
 
@@ -1114,8 +1392,8 @@ async def referral(cb: CallbackQuery):
         "🎁 <b>РЕФЕРАЛЬНАЯ ПРОГРАММА</b>",
         HR,
         "",
-        "Приглашай друзей — получай бонусы.",
-        "За каждого друга, который получит первую одобренную заявку — <b>+50 ⭐</b>.",
+        "Приглашай друзей — получай Wcoins.",
+        "За каждого друга, который получит первую одобренную заявку — <b>+50 Wcoins</b>.",
         "",
         f"👥 Приглашено: <b>{count}</b>",
         "",
@@ -1263,15 +1541,16 @@ async def on_comments(m: Message, state: FSMContext):
 async def on_req(m: Message, state: FSMContext):
     req = (m.text or "").strip()
     if len(req) < 5:
-        return await m.answer("⚠️ Слишком коротко. Укажи карту/СБП/крипту.")
+        return await m.answer("⚠️ Слишком коротко.")
     await state.update_data(requisites=req)
     await state.set_state(PayoutFSM.confirm)
     d = await state.get_data()
+    earned = (d["views_claim"] // 1000) * WCOIN_PER_1K_VIEWS
     summary = (f"✅ <b>ПРОВЕРЬ ЗАЯВКУ</b>\n{HR}\n"
                f"🔗 {html.escape(d['link'])}\n"
                f"📅 {html.escape(d['published_date'])}\n"
                f"👀 {d['views_claim']} просмотров\n"
-               f"💳 {html.escape(d['requisites'])}\n"
+               f"💰 К начислению: <b>{earned} Wcoins</b>\n"
                f"🎥 Видео: {'приложено' if d.get('banner_video_id') else 'пропущено'}\n"
                f"{HR}\nВсё верно?")
     await m.answer(summary, reply_markup=confirm_kb_())
@@ -1287,42 +1566,45 @@ async def submit(cb: CallbackQuery, state: FSMContext):
     if not all(k in d and d[k] is not None for k in required):
         await state.clear()
         await cb.answer("Сессия истекла, начни заново", show_alert=True)
-        return await edit(cb.message, "⏳ Сессия истекла. Нажми «Подать заявку» заново.",
+        return await edit(cb.message, "⏳ Сессия истекла.",
                           reply_markup=user_menu())
     try:
         pid = p_add(d)
     except sqlite3.IntegrityError:
         await state.clear()
         await cb.answer("Эта ссылка уже подавалась", show_alert=True)
-        return await edit(cb.message, "⚠️ Дубль ссылки. Попробуй другую.",
+        return await edit(cb.message, "⚠️ Дубль ссылки.",
                           reply_markup=user_menu())
     await state.clear()
+    earned = (d["views_claim"] // 1000) * WCOIN_PER_1K_VIEWS
     await edit(cb.message,
                f"🎉 <b>Заявка #{pid} принята!</b>\n{HR}\n"
-               "Проверим в течение <b>3–5 рабочих дней</b>.\n"
-               "Уведомление придёт сюда же.",
+               f"Проверим в течение <b>3–5 рабочих дней</b>.\n"
+               f"При одобрении начислим <b>{earned} Wcoins</b>.",
                reply_markup=user_menu())
     await log_event(cb.bot, "payouts",
                     f"🆕 <b>Новая заявка #{pid}</b>\n{HR}\n"
                     f"👤 <code>{d['user_id']}</code> @{d.get('username') or '—'}\n"
                     f"🔗 {html.escape(d['link'])}\n👀 {d['views_claim']} просмотров\n"
-                    f"📅 {html.escape(d['published_date'])}")
+                    f"💰 {earned} Wcoins при одобрении")
     await cb.answer("Отправлено")
 
 
 # =========================================================
-# ADMIN — общие
+# ADMIN
 # =========================================================
 async def show_card(target, fs: str, idx: int, edit_mode: bool = False):
     rows = p_list(fs)
     if not rows or not (0 <= idx < len(rows)):
         return await target.answer("Заявок нет.")
     r = rows[idx]
+    earned = (r["views_claim"] // 1000) * WCOIN_PER_1K_VIEWS
     body = (f"<b>ЗАЯВКА #{r['id']}</b> — {STATUSES.get(r['status'], r['status'])}\n{HR}\n"
             f"👤 <code>{r['user_id']}</code> @{r['username'] or '—'}\n"
             f"🔗 {html.escape(r['link'])}\n"
             f"📅 {html.escape(r['published_date'] or '')}\n"
             f"👀 {r['views_claim']} просмотров\n"
+            f"💰 К начислению: <b>{earned} Wcoins</b>\n"
             f"💳 {html.escape(r['requisites'] or '')}"
             + (f"\n📝 <b>Причина:</b> {html.escape(r['reason'])}" if r["reason"] else ""))
     markup = payout_card_kb(r["id"], r["status"], idx, len(rows), fs)
@@ -1344,9 +1626,6 @@ async def _notify_user(bot, uid, text_):
                         level="warning")
 
 
-# =========================================================
-# ADMIN — handlers
-# =========================================================
 @adm.message(Command("admin"))
 @admin_only
 async def admin_cmd(m: Message, state: FSMContext):
@@ -1383,6 +1662,9 @@ async def adm_cancel(cb: CallbackQuery, state: FSMContext):
 async def stats(cb: CallbackQuery):
     p = {r["status"]: r["c"] for r in
          _all("SELECT status, COUNT(*) c FROM payouts GROUP BY status")}
+    wc_total = _one("SELECT COALESCE(SUM(wcoins),0) s FROM users")["s"]
+    wd_pending = _one("SELECT COUNT(*) c FROM withdraw_requests WHERE status='pending'")["c"]
+    wd_paid = _one("SELECT COALESCE(SUM(wcoins),0) s FROM withdraw_requests WHERE status='paid'")["s"]
     body = (f"📊 <b>СТАТИСТИКА</b>\n{HR}\n"
             f"🗂 Баннеров: <b>{_one('SELECT COUNT(*) c FROM banners')['c']}</b>\n"
             f"⏳ На проверке: <b>{p.get('pending', 0)}</b>\n"
@@ -1393,6 +1675,10 @@ async def stats(cb: CallbackQuery):
             f"👥 Юзеров: <b>{_one('SELECT COUNT(*) c FROM users')['c']}</b>\n"
             f"🎁 Рефералов: <b>{_one('SELECT COUNT(*) c FROM referrals')['c']}</b>\n"
             f"📢 Каналов: <b>{ch_count()}</b>\n"
+            f"{HR}\n"
+            f"💰 Wcoins в системе: <b>{wc_total}</b>\n"
+            f"📤 Выводов в ожидании: <b>{wd_pending}</b>\n"
+            f"📤 Выведено (всего): <b>{wd_paid} Wcoins</b>\n"
             f"👤 Админов: <b>{len(set(ADMIN_IDS) | set(adm_db()))}</b>")
     await edit(cb.message, body, reply_markup=back_admin())
     await cb.answer()
@@ -1476,27 +1762,35 @@ async def approve(cb: CallbackQuery):
     except Exception:
         pass
     await cb.message.answer(f"✅ Заявка #{pid} одобрена (холд {hold} дней).")
+
+    # начисление Wcoins за просмотры
+    earned = (r["views_claim"] // 1000) * WCOIN_PER_1K_VIEWS
+    if earned > 0:
+        wc_add(r["user_id"], earned, "payout", pid)
+
     await log_event(cb.bot, "payouts",
                     f"✅ <b>Одобрена #{pid}</b>\n{HR}\n"
                     f"👤 Партнёр: <code>{r['user_id']}</code> @{r['username'] or '—'}\n"
                     f"👨‍💼 Админ: <code>{cb.from_user.id}</code>\n"
-                    f"⏳ Холд: {hold} дней\n🔗 {html.escape(r['link'])}")
+                    f"⏳ Холд: {hold} дней\n"
+                    f"💰 Начислено: {earned} Wcoins")
     await _notify_user(cb.bot, r["user_id"],
                        f"✅ <b>Заявка #{pid} одобрена!</b>\n{HR}\n"
-                       f"Выплата после {hold}-дневного холда.")
+                       f"Начислено: <b>+{earned} Wcoins</b>\n"
+                       f"Проверь кошелёк.")
 
     ref = ref_first_unpaid(r["user_id"])
     if ref:
-        u_stars_add(ref["referrer_id"], 50)
+        bonus = 50
+        wc_add(ref["referrer_id"], bonus, "referral", pid)
         ref_mark_paid(ref["id"])
         await _notify_user(cb.bot, ref["referrer_id"],
                            f"🎁 <b>Бонус за друга!</b>\n{HR}\n"
                            f"Твой реферал получил первую одобренную заявку.\n"
-                           f"Тебе начислено <b>+50 ⭐</b>.")
+                           f"Тебе начислено <b>+{bonus} Wcoins</b>.")
         await log_event(cb.bot, "users",
                         f"🎁 <b>Реферальный бонус</b>\n"
-                        f"👤 <code>{ref['referrer_id']}</code> → +50 ⭐\n"
-                        f"🆕 За <code>{r['user_id']}</code>")
+                        f"👤 <code>{ref['referrer_id']}</code> → +{bonus} Wcoins")
     await cb.answer("Одобрено")
 
 
@@ -1526,9 +1820,9 @@ async def reject_finish(m: Message, state: FSMContext):
     await m.answer(f"❌ Заявка #{pid} отклонена.", reply_markup=admin_menu())
     await log_event(m.bot, "payouts",
                     f"❌ <b>Отклонена #{pid}</b>\n{HR}\n"
-                    f"👤 Партнёр: <code>{r['user_id']}</code> @{r['username'] or '—'}\n"
-                    f"👨‍💼 Админ: <code>{m.from_user.id}</code>\n"
-                    f"📝 Причина: {html.escape(reason)}")
+                    f"👤 <code>{r['user_id']}</code>\n"
+                    f"👨‍💼 <code>{m.from_user.id}</code>\n"
+                    f"📝 {html.escape(reason)}")
     await _notify_user(m.bot, r["user_id"],
                        f"❌ <b>Заявка #{pid} отклонена</b>\n{HR}\n"
                        f"<b>Причина:</b> {html.escape(reason)}")
@@ -1549,13 +1843,148 @@ async def mark_paid(cb: CallbackQuery):
     await cb.message.answer(f"💰 Заявка #{pid} выплачена.")
     await log_event(cb.bot, "payouts",
                     f"💰 <b>Выплачено #{pid}</b>\n{HR}\n"
-                    f"👤 Партнёр: <code>{r['user_id']}</code> @{r['username'] or '—'}\n"
-                    f"👨‍💼 Админ: <code>{cb.from_user.id}</code>\n"
-                    f"💳 {html.escape(r['requisites'] or '')}")
-    await _notify_user(cb.bot, r["user_id"],
-                       f"💰 <b>Заявка #{pid}: выплата произведена!</b>\n{HR}\n"
-                       "Спасибо за работу 🤝")
+                    f"👤 <code>{r['user_id']}</code>\n"
+                    f"👨‍💼 <code>{cb.from_user.id}</code>")
     await cb.answer("Выплачено")
+
+
+# --- выводы Wcoins ---
+@adm.callback_query(F.data == "adm:withdraws")
+@admin_only
+async def withdraws_list(cb: CallbackQuery):
+    rows = wd_list("pending")
+    if not rows:
+        return await edit(cb.message, "📤 Заявок на вывод нет.",
+                          reply_markup=kb(back="adm:main"))
+    lines = [f"📤 <b>ЗАЯВКИ НА ВЫВОД</b>\n{HR}\n"]
+    buttons = []
+    for r in rows[:10]:
+        usdt = wcoins_to_usdt_str(r["wcoins"])
+        lines.append(
+            f"#{r['id']} — <code>{r['user_id']}</code>\n"
+            f"  🪙 {r['wcoins']} Wcoins → {usdt} USDT")
+        buttons.append([(f"✅ #{r['id']}", f"adm:wd_paid:{r['id']}"),
+                        (f"❌ #{r['id']}", f"adm:wd_reject:{r['id']}")])
+    buttons.append([("⬅️ Назад", "adm:main")])
+    await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
+    await cb.answer()
+
+
+@adm.callback_query(F.data.startswith("adm:wd_paid:"))
+@admin_only
+async def withdraw_paid(cb: CallbackQuery):
+    rid = int(cb.data.split(":", 2)[2])
+    r = wd_get(rid)
+    if not r or r["status"] != "pending":
+        return await cb.answer("Уже обработана", show_alert=True)
+    wd_set(rid, "paid", cb.from_user.id)
+    usdt = wcoins_to_usdt_str(r["wcoins"])
+    await cb.answer(f"Вывод #{rid} закрыт")
+    await _notify_user(cb.bot, r["user_id"],
+                       f"💰 <b>Вывод #{rid} выполнен!</b>\n{HR}\n"
+                       f"Отправлено: <b>{usdt} USDT</b>\n"
+                       f"Проверь @CryptoBot → Чеки.")
+    await log_event(cb.bot, "withdraw",
+                    f"✅ <b>Вывод #{rid} выплачен</b>\n"
+                    f"👤 <code>{r['user_id']}</code>\n"
+                    f"🪙 {r['wcoins']} Wcoins → {usdt} USDT\n"
+                    f"👨‍💼 <code>{cb.from_user.id}</code>")
+
+
+@adm.callback_query(F.data.startswith("adm:wd_reject:"))
+@admin_only
+async def withdraw_reject_start(cb: CallbackQuery, state: FSMContext):
+    rid = int(cb.data.split(":", 2)[2])
+    r = wd_get(rid)
+    if not r or r["status"] != "pending":
+        return await cb.answer("Уже обработана", show_alert=True)
+    await state.set_state(AdminFSM.wd_reason)
+    await state.update_data(wd_reject_id=rid)
+    await cb.message.answer(f"Причина отклонения #{rid}:",
+                            reply_markup=cancel_admin())
+    await cb.answer()
+
+
+@adm.message(StateFilter(AdminFSM.wd_reason))
+@admin_only
+async def withdraw_reject_finish(m: Message, state: FSMContext):
+    d = await state.get_data()
+    rid = d["wd_reject_id"]
+    reason = (m.text or "").strip()
+    r = wd_get(rid)
+    if not r:
+        await state.clear()
+        return await m.answer("Не найдено", reply_markup=admin_menu())
+
+    wc_add(r["user_id"], r["wcoins"], "refund", rid)
+    wd_set(rid, "rejected", m.from_user.id, reason)
+
+    await state.clear()
+    await m.answer(f"❌ Вывод #{rid} отклонён, Wcoins возвращены.",
+                   reply_markup=admin_menu())
+    await _notify_user(m.bot, r["user_id"],
+                       f"❌ <b>Вывод #{rid} отклонён</b>\n{HR}\n"
+                       f"<b>Причина:</b> {html.escape(reason)}\n\n"
+                       f"Wcoins возвращены на баланс.")
+    await log_event(m.bot, "withdraw",
+                    f"❌ <b>Вывод #{rid} отклонён</b>\n"
+                    f"👤 <code>{r['user_id']}</code>\n"
+                    f"📝 {html.escape(reason)}\n"
+                    f"↩️ Возврат {r['wcoins']} Wcoins")
+
+
+# --- ручное начисление Wcoins ---
+@adm.callback_query(F.data == "adm:wc_add")
+@admin_only
+async def wc_add_start(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.wc_user)
+    await cb.message.answer("Пришли <code>user_id</code>:", reply_markup=cancel_admin())
+    await cb.answer()
+
+
+@adm.message(StateFilter(AdminFSM.wc_user))
+@admin_only
+async def wc_add_user(m: Message, state: FSMContext):
+    try:
+        uid = int((m.text or "").strip())
+    except ValueError:
+        return await m.answer("Нужно число.")
+    await state.update_data(wc_uid=uid)
+    await state.set_state(AdminFSM.wc_amount)
+    await m.answer("Сколько Wcoins начислить? (минус — списать):",
+                   reply_markup=cancel_admin())
+
+
+@adm.message(StateFilter(AdminFSM.wc_amount))
+@admin_only
+async def wc_add_amount(m: Message, state: FSMContext):
+    try:
+        amount = int((m.text or "").strip())
+    except ValueError:
+        return await m.answer("Нужно число.")
+    d = await state.get_data()
+    uid = d["wc_uid"]
+
+    if amount > 0:
+        wc_add(uid, amount, "manual", m.from_user.id)
+    elif amount < 0:
+        if not wc_spend(uid, -amount, "manual", m.from_user.id):
+            return await m.answer("Недостаточно Wcoins для списания.")
+    else:
+        return await m.answer("Ноль не считается.")
+
+    await state.clear()
+    bal = wc_balance(uid)
+    await m.answer(f"✅ {amount:+d} Wcoins для <code>{uid}</code>.\n"
+                   f"Баланс: <b>{bal}</b>", reply_markup=admin_menu())
+    await _notify_user(m.bot, uid,
+                       f"🪙 <b>Изменение баланса</b>\n{HR}\n"
+                       f"Начислено: <b>{amount:+d} Wcoins</b>\n"
+                       f"Баланс: <b>{bal}</b>")
+    await log_event(m.bot, "users",
+                    f"🪙 <b>Ручное изменение Wcoins</b>\n"
+                    f"👤 <code>{uid}</code>: {amount:+d} W\n"
+                    f"👨‍💼 <code>{m.from_user.id}</code>")
 
 
 # --- ответ поддержки через reply в ЛС бота ---
@@ -1728,11 +2157,10 @@ async def log_menu(cb: CallbackQuery, state: FSMContext):
                f"📡 <b>ЛОГИ</b>\n{HR}\n"
                f"Статус: {'🟢 включены' if on else '🔴 выключены'}\n"
                f"Группа: <code>{chat}</code>\n\n"
-               "<b>Как настроить:</b>\n"
-               "1. Создай группу → включи «Темы»\n"
-               "2. Добавь бота админом\n"
-               "3. Создай темы и впиши их ID\n"
-               "4. Включи логи\n\n"
+               "<b>Темы:</b>\n"
+               "• 💰 Заявки — новые заявки, одобрения, отказы\n"
+               "• 📤 Выводы — запросы на вывод USDT\n"
+               "• 🗂 Баннеры, 👤 Юзеры, ⚙️ Настройки, 🚨 Ошибки, 📞 Поддержка\n\n"
                "Тапни на параметр, чтобы изменить 👇",
                reply_markup=log_menu_kb())
     await cb.answer()
@@ -2256,6 +2684,20 @@ async def queue_cmd(m: Message):
     await m.answer(f"📋 Заявок на проверке: {len(rows)}. Открываю первую.",
                    reply_markup=payouts_filter_kb("pending"))
     await show_card(m, "pending", 0)
+
+
+@adm.message(Command("withdraws"))
+@admin_only
+async def withdraws_cmd(m: Message):
+    rows = wd_list("pending")
+    if not rows:
+        return await m.answer("Заявок на вывод нет.")
+    lines = [f"📤 <b>ВЫВОДЫ В ОЖИДАНИИ: {len(rows)}</b>\n{HR}\n"]
+    for r in rows[:10]:
+        lines.append(f"#{r['id']} — <code>{r['user_id']}</code> — "
+                     f"{r['wcoins']} Wcoins → {wcoins_to_usdt_str(r['wcoins'])} USDT")
+    lines.append("\nОткрой в админке: 📤 Выводы Wcoins")
+    await m.answer("\n".join(lines))
 
 
 @adm.message(Command("blacklist"))
