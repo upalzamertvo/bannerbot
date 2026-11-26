@@ -3,7 +3,7 @@ VPN Payout Bot — Wcoins edition.
 - Wcoins: 10 Wcoins = 1 USDT
 - Начисление: 10 Wcoins за 1000 просмотров, бонусы за рефералов
 - Вывод: USDT (чек @CryptoBot) ИЛИ Telegram Stars (по курсу 1.8 ₽/⭐)
-- Динамический курс USDT/RUB через CryptoBot API (fallback 100)
+- Курс USDT/RUB — фиксированный, меняется в админке (fallback 100)
 - FAQ на 2 страницы
 - Отдельный лог-топик для выводов
 - Обязательная подписка
@@ -50,15 +50,12 @@ def _ints(raw: str) -> list[int]:
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = _ints(os.getenv("ADMIN_IDS", ""))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
-CRYPTO_PAY_TOKEN = os.getenv("CRYPTO_PAY_TOKEN", "")
 
-# Фиксированные константы Wcoins
-WCOIN_RATE = 10             # 10 Wcoins = 1 USDT
+WCOIN_RATE = 10
 WCOIN_PER_1K_VIEWS = 10
 WCOIN_MIN_WITHDRAW = 10
 WCOIN_MAX_WITHDRAW = 100000
 
-# Курс звезды и fallback USDT/RUB (управляются через админку)
 STAR_PRICE_RUB_FALLBACK = 1.8
 USDT_RUB_FALLBACK = 79
 
@@ -234,14 +231,9 @@ conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.row_factory = sqlite3.Row
 _cache: dict[str, str] = {}
 
-
-def _q(sql: str, args: tuple = ()):
-    return conn.execute(sql, args)
-
-def _x(sql: str, args: tuple = ()):
-    with conn:
-        return conn.execute(sql, args)
-
+def _q(sql, args=()): return conn.execute(sql, args)
+def _x(sql, args=()):
+    with conn: return conn.execute(sql, args)
 def _all(sql, args=()): return _q(sql, args).fetchall()
 def _one(sql, args=()): return _q(sql, args).fetchone()
 
@@ -311,22 +303,17 @@ def init_db():
             invite_link TEXT,
             added_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
-    # Миграция users.wcoins
-    try:
-        cols = [r["name"] for r in _all("PRAGMA table_info(users)")]
-        if "wcoins" not in cols:
-            conn.execute("ALTER TABLE users ADD COLUMN wcoins INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    # Миграция withdraw_requests.currency
-    try:
-        cols = [r["name"] for r in _all("PRAGMA table_info(withdraw_requests)")]
-        if "currency" not in cols:
-            conn.execute(
-                "ALTER TABLE withdraw_requests ADD COLUMN currency TEXT DEFAULT 'usdt'"
-            )
-    except Exception:
-        pass
+    for table, col, ddl in (
+        ("users", "wcoins", "ALTER TABLE users ADD COLUMN wcoins INTEGER DEFAULT 0"),
+        ("withdraw_requests", "currency",
+         "ALTER TABLE withdraw_requests ADD COLUMN currency TEXT DEFAULT 'usdt'"),
+    ):
+        try:
+            cols = [r["name"] for r in _all(f"PRAGMA table_info({table})")]
+            if col not in cols:
+                conn.execute(ddl)
+        except Exception:
+            pass
 
 
 # --- settings ---
@@ -366,76 +353,18 @@ def t(key: str, default: str = "", **kw) -> str:
 
 
 # =========================================================
-# ДИНАМИЧЕСКИЙ КУРС USDT/RUB (CryptoBot API)
+# КУРС USDT/RUB — ФИКСИРОВАННЫЙ (из настроек админки)
 # =========================================================
-_cp_client = None
-_usdt_rub_cache = {"rate": USDT_RUB_FALLBACK, "ts": 0.0}
-
-
-async def _get_cp():
-    """Ленивая инициализация async-клиента CryptoBot."""
-    global _cp_client
-    if _cp_client is None:
-        if not CRYPTO_PAY_TOKEN:
-            logger.warning("❌ CRYPTO_PAY_TOKEN не задан — курс будет fallback")
-            return None
-        try:
-            from crypto_pay_api import CryptoPayAsync, CryptoPayConfig
-            _cp_client = CryptoPayAsync(CryptoPayConfig(token=CRYPTO_PAY_TOKEN))
-            logger.info("✅ CryptoBot клиент создан")
-        except ImportError:
-            logger.error("❌ cryptopay-python-sdk не установлен / модуль crypto_pay_api не найден")
-        except Exception as e:
-            logger.error(f"❌ Ошибка инициализации CryptoBot: {e}")
-    return _cp_client
-
-
 async def fetch_usdt_rub() -> float:
-    """Курс USDT/RUB с кэшем на 10 минут. Fallback — последний известный / из настроек."""
-    now = time.time()
-    if now - _usdt_rub_cache["ts"] < 600:
-        return _usdt_rub_cache["rate"]
-
-    cp = await _get_cp()
-    if cp:
-        try:
-            rates = await cp.get_exchange_rates()
-            logger.info(f"Получено курсов: {len(rates)}")
-            for r in rates[:5]:
-                logger.info(
-                    f"  Пример пары: {getattr(r, 'source', '?')} -> "
-                    f"{getattr(r, 'target', '?')} = {getattr(r, 'rate', '?')}"
-                )
-            for r in rates:
-                source_val = getattr(r, "source", None)
-                source_str = str(source_val) if source_val is not None else ""
-                if hasattr(source_val, "name"):
-                    source_str = source_val.name
-                target_val = getattr(r, "target", None)
-                target_str = str(target_val) if target_val is not None else ""
-                if source_str == "USDT" and target_str == "RUB":
-                    rate = float(r.rate)
-                    logger.info(f"✅ Найден курс USDT/RUB: {rate}")
-                    _usdt_rub_cache["rate"] = rate
-                    _usdt_rub_cache["ts"] = now
-                    return rate
-            logger.warning("⚠️ Пара USDT/RUB не найдена в ответе API")
-        except Exception as e:
-            logger.error(f"❌ Ошибка при запросе курса: {e}")
-
-    fallback = s_float("usdt_rub", USDT_RUB_FALLBACK)
-    logger.warning(f"Использую fallback-курс: {fallback}")
-    _usdt_rub_cache["rate"] = fallback
-    return fallback
+    """Курс USDT/RUB берётся из настроек админки. Меняется в панели."""
+    return s_float("usdt_rub", USDT_RUB_FALLBACK)
 
 
 def star_price_rub() -> float:
     return s_float("star_price_rub", STAR_PRICE_RUB_FALLBACK)
 
-
 def stars_to_rub(stars: int) -> float:
     return stars * star_price_rub()
-
 
 def wcoins_to_usdt_str(wcoins: int) -> str:
     usdt = wcoins / WCOIN_RATE
@@ -443,14 +372,9 @@ def wcoins_to_usdt_str(wcoins: int) -> str:
         return str(int(usdt))
     return f"{usdt:.2f}"
 
-
 async def wcoins_to_stars(wcoins: int) -> int:
-    """10 Wcoins = 1 USDT → рубли по динамическому курсу → звёзды по star_price_rub."""
-    usdt = wcoins / WCOIN_RATE
-    rub = usdt * await fetch_usdt_rub()
+    rub = (wcoins / WCOIN_RATE) * await fetch_usdt_rub()
     return max(0, int(rub / star_price_rub()))
-
-
 # --- banners ---
 def b_add(fid, ftype, title, category):
     return _x("INSERT INTO banners(file_id,file_type,title,category) "
@@ -781,6 +705,8 @@ def autoclose(func):
             except Exception:
                 pass
     return wrapper
+
+
 # =========================================================
 # LOGGING
 # =========================================================
@@ -869,8 +795,6 @@ class SubscriptionMW(BaseMiddleware):
         else:
             await event.answer(text_msg, reply_markup=markup)
         return
-
-
 # =========================================================
 # KEYBOARDS
 # =========================================================
@@ -2636,19 +2560,15 @@ async def banner_cat(m: Message, state: FSMContext):
 
 
 # --- каналы подписки ---
-@adm.callback_query(F.data == "adm:channels")
-@admin_only
-async def channels_menu(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
+async def _render_channels(cb: CallbackQuery):
     chs = ch_all()
     if not chs:
-        body = ("📢 <b>КАНАЛЫ ПОДПИСКИ</b>\n"
-                f"{HR}\n\nПока ни одного канала нет.\n"
-                "Добавь канал, чтобы требовать подписку.")
-        rows = [("➕ Добавить канал", "adm:ch_add")]
-        rows.append(("⬅️ Назад", "adm:main"))
-        await edit(cb.message, body, reply_markup=kb(*rows))
-        return await cb.answer()
+        return await edit(
+            cb.message,
+            f"📢 <b>КАНАЛЫ ПОДПИСКИ</b>\n{HR}\n\nПока ни одного канала нет.\n"
+            "Добавь канал, чтобы требовать подписку.",
+            reply_markup=kb(("➕ Добавить канал", "adm:ch_add"),
+                            ("⬅️ Назад", "adm:main")))
     lines = [f"📢 <b>КАНАЛЫ ПОДПИСКИ</b>\n{HR}\n"]
     buttons = []
     for ch in chs:
@@ -2661,6 +2581,13 @@ async def channels_menu(cb: CallbackQuery, state: FSMContext):
     buttons.append([("➕ Добавить канал", "adm:ch_add")])
     buttons.append([("⬅️ Назад", "adm:main")])
     await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
+
+
+@adm.callback_query(F.data == "adm:channels")
+@admin_only
+async def channels_menu(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _render_channels(cb)
     await cb.answer()
 
 
@@ -2678,26 +2605,7 @@ async def channel_del(cb: CallbackQuery):
                     f"👨‍💼 Админ: <code>{cb.from_user.id}</code>",
                     level="warning")
     await cb.answer("Канал удалён")
-    # Перерисовываем меню каналов
-    chs = ch_all()
-    if not chs:
-        await edit(cb.message,
-                   f"📢 <b>КАНАЛЫ ПОДПИСКИ</b>\n{HR}\n\nСписок пуст.",
-                   reply_markup=kb(("➕ Добавить канал", "adm:ch_add"),
-                                   ("⬅️ Назад", "adm:main")))
-    else:
-        lines = [f"📢 <b>КАНАЛЫ ПОДПИСКИ</b>\n{HR}\n"]
-        buttons = []
-        for c in chs:
-            lines.append(
-                f"<b>{html.escape(c['title'] or c['channel_id'])}</b>\n"
-                f"  ID: <code>{html.escape(c['channel_id'])}</code>\n"
-                f"  🔗 {html.escape(c['invite_link'] or '—')}")
-            buttons.append([(f"🗑 {c['title'] or c['channel_id']}",
-                             f"adm:ch_del:{c['id']}")])
-        buttons.append([("➕ Добавить канал", "adm:ch_add")])
-        buttons.append([("⬅️ Назад", "adm:main")])
-        await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
+    await _render_channels(cb)
 
 
 @adm.callback_query(F.data == "adm:ch_add")
@@ -2763,10 +2671,7 @@ async def channel_link_step(m: Message, state: FSMContext):
 
 
 # --- чёрный список ---
-@adm.callback_query(F.data == "adm:blacklist")
-@admin_only
-async def blacklist_menu(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
+async def _render_blacklist(cb: CallbackQuery):
     rows = bl_all()
     if not rows:
         return await edit(
@@ -2786,6 +2691,13 @@ async def blacklist_menu(cb: CallbackQuery, state: FSMContext):
     buttons.append([("➕ Добавить", "adm:bl_add")])
     buttons.append([("⬅️ Назад", "adm:main")])
     await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
+
+
+@adm.callback_query(F.data == "adm:blacklist")
+@admin_only
+async def blacklist_menu(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _render_blacklist(cb)
     await cb.answer()
 
 
@@ -2839,26 +2751,7 @@ async def bl_del_cb(cb: CallbackQuery):
                     f"♻️ <b>Удалён из ЧС</b>\n👤 <code>{uid}</code>\n"
                     f"👨‍💼 <code>{cb.from_user.id}</code>",
                     level="warning")
-    # Перерисовать
-    rows = bl_all()
-    if not rows:
-        await edit(cb.message,
-                   f"🚫 <b>ЧЁРНЫЙ СПИСОК</b>\n{HR}\n\nПусто.",
-                   reply_markup=kb(("➕ Добавить", "adm:bl_add"),
-                                   ("⬅️ Назад", "adm:main")))
-    else:
-        lines = [f"🚫 <b>ЧЁРНЫЙ СПИСОК</b>\n{HR}\n"]
-        buttons = []
-        for r in rows[:15]:
-            lines.append(
-                f"<code>{r['user_id']}</code>\n"
-                f"  📝 {html.escape(r['reason'] or '—')}\n"
-                f"  📅 {r['created_at'][:16]}")
-            buttons.append([(f"❌ {r['user_id']}",
-                             f"adm:bl_del:{r['user_id']}")])
-        buttons.append([("➕ Добавить", "adm:bl_add")])
-        buttons.append([("⬅️ Назад", "adm:main")])
-        await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
+    await _render_blacklist(cb)
 
 
 # --- админы ---
@@ -2940,17 +2833,7 @@ async def main():
 
     init_db()
 
-    # Диагностика курса при старте
-    logger.info("CRYPTO_PAY_TOKEN задан: %s", bool(CRYPTO_PAY_TOKEN))
-    if CRYPTO_PAY_TOKEN:
-        cp = await _get_cp()
-        if cp:
-            logger.info("CryptoBot клиент готов — проверяю курс...")
-            try:
-                rate = await fetch_usdt_rub()
-                logger.info("Стартовый курс USDT/RUB: %.2f", rate)
-            except Exception as e:
-                logger.error("Не удалось получить стартовый курс: %s", e)
+    logger.info("Курс USDT/RUB (из настроек): %.2f", await fetch_usdt_rub())
 
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=FSMStorage(conn))
@@ -2970,4 +2853,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())    
