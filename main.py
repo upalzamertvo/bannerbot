@@ -22,6 +22,13 @@ from functools import wraps
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
 
+import pkg_resources
+try:
+    version = pkg_resources.get_distribution("cryptopay-python-sdk").version
+    logger.info(f"✅ cryptopay-python-sdk установлен, версия: {version}")
+except Exception as e:
+    logger.error(f"❌ cryptopay-python-sdk НЕ установлен: {e}")
+    
 try:
     from dotenv import load_dotenv
     load_dotenv()
