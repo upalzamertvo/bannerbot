@@ -1523,7 +1523,7 @@ async def referral(cb: CallbackQuery):
         HR,
         "",
         "Приглашай друзей — получай Wcoins.",
-        "За каждого друга, который получит первую одобренную заявку — <b>+50 Wcoins</b>.",
+        "За каждого друга, который получит первую одобренную заявку — <b>+10 Wcoins</b>.",
         "",
         f"👥 Приглашено: <b>{count}</b>",
         "",
@@ -1908,7 +1908,8 @@ async def approve(cb: CallbackQuery):
 
     ref = ref_first_unpaid(r["user_id"])
     if ref:
-        bonus = 50
+        bonus = 10
+        
         wc_add(ref["referrer_id"], bonus, "referral", pid)
         ref_mark_paid(ref["id"])
         await _notify_user(cb.bot, ref["referrer_id"],
