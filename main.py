@@ -940,7 +940,7 @@ class AdminFSM(StatesGroup):
     reject_reason = State(); bl_user = State(); bl_reason = State(); adm_user = State()
     ch_id = State(); ch_title = State(); ch_link = State()
     wc_user = State(); wc_amount = State()
-    wd_reason = State()
+    wd_reason = State(); wd_check_link = State()
 
 
 class SupportFSM(StatesGroup):
@@ -1995,8 +1995,11 @@ async def withdraws_list(cb: CallbackQuery):
         lines.append(
             f"#{r['id']} — <code>{r['user_id']}</code>\n"
             f"  🪙 {r['wcoins']} Wcoins → {result}")
-        buttons.append([(f"✅ #{r['id']}", f"adm:wd_paid:{r['id']}"),
-                        (f"❌ #{r['id']}", f"adm:wd_reject:{r['id']}")])
+        buttons.append([
+            (f"✅ #{r['id']}", f"adm:wd_paid:{r['id']}"),
+            (f"❌ #{r['id']}", f"adm:wd_reject:{r['id']}"),
+            (f"📎 Чек #{r['id']}", f"adm:wd_check:{r['id']}"),
+        ])
     buttons.append([("⬅️ Назад", "adm:main")])
     await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
     await cb.answer()
@@ -2074,6 +2077,67 @@ async def withdraw_reject_finish(m: Message, state: FSMContext):
                     f"👤 <code>{r['user_id']}</code>\n"
                     f"📝 {html.escape(reason)}\n"
                     f"↩️ Возврат {r['wcoins']} Wcoins")
+
+
+@adm.callback_query(F.data.startswith("adm:wd_check:"))
+@admin_only
+async def withdraw_check_start(cb: CallbackQuery, state: FSMContext):
+    rid = int(cb.data.split(":", 2)[2])
+    r = wd_get(rid)
+    if not r or r["status"] != "pending":
+        return await cb.answer("Уже обработана", show_alert=True)
+    await state.set_state(AdminFSM.wd_check_link)
+    await state.update_data(wd_check_id=rid)
+    await cb.message.answer(
+        f"📎 <b>Чек для вывода #{rid}</b>\n{HR}\n"
+        f"👤 <code>{r['user_id']}</code>\n"
+        f"🪙 {r['wcoins']} Wcoins → "
+        f"{wcoins_to_usdt_str(r['wcoins'])} USDT\n\n"
+        f"Создай чек в @CryptoBot и пришли ссылку сюда.\n"
+        f"Например: <code>https://t.me/CryptoBot?start=...</code>",
+        reply_markup=cancel_admin())
+    await cb.answer()
+
+
+@adm.message(StateFilter(AdminFSM.wd_check_link))
+@admin_only
+async def withdraw_check_finish(m: Message, state: FSMContext):
+    d = await state.get_data()
+    rid = d["wd_check_id"]
+    link = (m.text or "").strip()
+    if not link.startswith(("http://", "https://")):
+        return await m.answer("Нужна корректная ссылка https://...")
+
+    r = wd_get(rid)
+    if not r:
+        await state.clear()
+        return await m.answer("Заявка не найдена.", reply_markup=admin_menu())
+
+    wd_set(rid, "paid", m.from_user.id)
+
+    try:
+        await m.bot.send_message(
+            r["user_id"],
+            f"💰 <b>Вывод #{rid} выполнен!</b>\n{HR}\n"
+            f"Чек на <b>{wcoins_to_usdt_str(r['wcoins'])} USDT</b> готов.\n"
+            f"Активируйте его по кнопке ниже 👇",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🎁 Активировать чек", url=link)
+            ]]))
+        await m.answer(f"✅ Чек отправлен юзеру <code>{r['user_id']}</code>.",
+                       reply_markup=admin_menu())
+    except Exception as e:
+        await m.answer(f"⚠️ Не доставлено юзеру: {html.escape(str(e)[:200])}",
+                       reply_markup=admin_menu())
+
+    await state.clear()
+    await log_event(m.bot, "withdraw",
+                    f"✅ <b>Вывод #{rid} выплачен чеком</b>\n"
+                    f"👤 <code>{r['user_id']}</code>\n"
+                    f"🪙 {r['wcoins']} Wcoins → "
+                    f"{wcoins_to_usdt_str(r['wcoins'])} USDT\n"
+                    f"🔗 {html.escape(link)}\n"
+                    f"👨‍💼 <code>{m.from_user.id}</code>")
 
 
 # --- ручное начисление Wcoins ---
@@ -2393,8 +2457,6 @@ async def log_test(cb: CallbackQuery):
     if sent == 0:
         return await cb.answer("Не настроен ни один топик", show_alert=True)
     await cb.answer(f"Отправил тесты в {sent} топиков")
-
-
 # --- настройки ---
 @adm.callback_query(F.data == "adm:settings")
 @admin_only
