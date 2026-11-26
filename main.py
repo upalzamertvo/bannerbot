@@ -22,13 +22,6 @@ from functools import wraps
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
 
-import pkg_resources
-try:
-    version = pkg_resources.get_distribution("cryptopay-python-sdk").version
-    logger.info(f"✅ cryptopay-python-sdk установлен, версия: {version}")
-except Exception as e:
-    logger.error(f"❌ cryptopay-python-sdk НЕ установлен: {e}")
-    
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -67,7 +60,7 @@ WCOIN_MAX_WITHDRAW = 100000
 
 # Курс звезды и fallback USDT/RUB (управляются через админку)
 STAR_PRICE_RUB_FALLBACK = 1.8
-USDT_RUB_FALLBACK = 100.0
+USDT_RUB_FALLBACK = 79
 
 LOG_CATS = {
     "payouts":  ("💰", "Заявки"),
