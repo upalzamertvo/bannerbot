@@ -1,9 +1,11 @@
 """
 VPN Payout Bot — compact rewrite.
 - Рекламный текст убран
-- Кнопка "Скачать файл" убрана (файл и так в сообщении)
-- Добавлены: поддержка, FAQ, рефералка, новости
-- "Купить звёзды" — URL-кнопка в меню
+- Кнопка "Скачать файл" убрана
+- Поддержка: FSM внутри бота, логи в топик support, ответ через reply
+- Купить звёзды: URL-кнопка на https://t.me/wsquadstars_bot
+- Новости: https://t.me/wstarsforsale
+- Цена звёзд убрана
 """
 import asyncio
 import html
@@ -52,6 +54,7 @@ LOG_CATS = {
     "users":    ("👤", "Пользователи"),
     "settings": ("⚙️", "Настройки"),
     "errors":   ("🚨", "Ошибки"),
+    "support":  ("📞", "Поддержка"),
 }
 
 STATUSES = {
@@ -108,10 +111,9 @@ DEFAULTS = {
     "support_text": (
         "📞 <b>ПОДДЕРЖКА</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "По любым вопросам пиши:\n"
-        "• @your_support\n"
-        "• support@example.com\n\n"
-        "Отвечаем в течение 24 часов."
+        "Напиши свой вопрос одним сообщением — "
+        "мы получим его и ответим здесь же в боте.\n\n"
+        "<i>Чем подробнее опишешь проблему, тем быстрее поможем.</i>"
     ),
     "faq_text": (
         "❓ <b>ЧАСТЫЕ ВОПРОСЫ</b>\n"
@@ -127,13 +129,11 @@ DEFAULTS = {
         "<b>Как вставить баннер?</b>\n"
         "Смотри гайд в канале новостей."
     ),
-    "news_url": "https://t.me/telegram",
-    "support_username": "@your_support",
-    "stars_url": "https://t.me/telegram",
-    "stars_price_rub": "100",
+    "news_url": "https://t.me/wstarsforsale",
+    "stars_url": "https://t.me/wsquadstars_bot",
     "log_enabled": "0", "log_chat_id": "",
     "log_topic_payouts": "", "log_topic_banners": "", "log_topic_users": "",
-    "log_topic_settings": "", "log_topic_errors": "",
+    "log_topic_settings": "", "log_topic_errors": "", "log_topic_support": "",
 }
 
 GROUPS = {
@@ -162,15 +162,14 @@ LABELS = {
     "title_rules": "📋 Заголовок правил",
     "title_admin": "🛠 Заголовок админки",
     "news_url": "📢 URL канала новостей",
-    "support_username": "📞 Username поддержки",
     "stars_url": "⭐ Ссылка на покупку звёзд",
-    "stars_price_rub": "⭐ Цена 1 звезды (₽)",
     "log_chat_id": "🎯 ID группы для логов",
     "log_topic_payouts": "💰 ID темы «Заявки»",
     "log_topic_banners": "🗂 ID темы «Баннеры»",
     "log_topic_users": "👤 ID темы «Пользователи»",
     "log_topic_settings": "⚙️ ID темы «Настройки»",
     "log_topic_errors": "🚨 ID темы «Ошибки»",
+    "log_topic_support": "📞 ID темы «Поддержка»",
 }
 
 HR = "━" * 20
@@ -572,7 +571,7 @@ class LogMW(BaseMiddleware):
 # KEYBOARDS (semantic)
 # =========================================================
 def user_menu() -> InlineKeyboardMarkup:
-    stars_url = s("stars_url").strip() or "https://t.me/telegram"
+    stars_url = s("stars_url").strip() or "https://t.me/wsquadstars_bot"
     return kb(
         [(s("btn_catalog"), "cats"), (s("btn_payout"), "payout_start")],
         [(s("btn_my_payouts"), "my_payouts"), ("📊 Статистика", "my_stats")],
@@ -622,6 +621,7 @@ def log_menu_kb():
         (f"{mark('log_topic_users')} 👤 Тема «Юзеры»", "adm:log:set:log_topic_users"),
         (f"{mark('log_topic_settings')} ⚙️ Тема «Настройки»", "adm:log:set:log_topic_settings"),
         (f"{mark('log_topic_errors')} 🚨 Тема «Ошибки»", "adm:log:set:log_topic_errors"),
+        (f"{mark('log_topic_support')} 📞 Тема «Поддержка»", "adm:log:set:log_topic_support"),
         ("🧪 Тест всех топиков", "adm:log:test"),
         back="adm:main",
     )
@@ -632,9 +632,7 @@ def settings_kb():
         ("⏳ Дней холда", "adm:set:hold_days"),
         ("🚦 Лимит заявок/день", "adm:set:daily_limit"),
         ("📢 URL новостей", "adm:set:news_url"),
-        ("📞 Username поддержки", "adm:set:support_username"),
         ("⭐ Ссылка на покупку звёзд", "adm:set:stars_url"),
-        ("⭐ Цена звезды (₽)", "adm:set:stars_price_rub"),
         back="adm:main",
     )
 
@@ -704,6 +702,10 @@ class AdminFSM(StatesGroup):
     set_value = State(); style_edit = State(); log_value = State()
     b_file = State(); b_title = State(); b_cat = State()
     reject_reason = State(); bl_user = State(); bl_reason = State(); adm_user = State()
+
+
+class SupportFSM(StatesGroup):
+    message = State()
 
 
 STEPS = [
@@ -789,13 +791,79 @@ async def rules_cb(cb: CallbackQuery):
         await edit(cb.message, rules_text(), reply_markup=kb(back="main"))
 
 
+# --- поддержка ---
 @user.callback_query(F.data == "support")
 @autoclose
-async def support(cb: CallbackQuery):
+async def support(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(SupportFSM.message)
     if cb.message:
-        await edit(cb.message, s("support_text"), reply_markup=kb(back="main"))
+        await edit(cb.message, s("support_text"),
+                   reply_markup=kb(cancel="support_cancel"))
 
 
+@user.callback_query(F.data == "support_cancel")
+@autoclose
+async def support_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    if cb.message:
+        await edit(cb.message, "❌ Обращение отменено.",
+                   reply_markup=user_menu())
+
+
+@user.message(StateFilter(SupportFSM.message))
+async def support_message(m: Message, state: FSMContext):
+    text_body = (m.text or m.caption or "").strip()
+
+    if not text_body and not (m.photo or m.video or m.document or m.voice or m.audio):
+        return await m.answer("Напиши текстом или пришли файл.")
+
+    if text_body and len(text_body) < 5:
+        return await m.answer("Слишком коротко. Опиши подробнее.")
+    if text_body and len(text_body) > 4000:
+        return await m.answer("Слишком длинно. Сократи до 4000 символов.")
+
+    await state.clear()
+    uid = m.from_user.id
+    uname = m.from_user.username or "—"
+    fname = m.from_user.full_name or ""
+
+    await m.answer(
+        f"✅ <b>Обращение принято</b>\n{HR}\n"
+        "Мы ответим тебе здесь же, в этом чате.\n"
+        "Обычно это занимает до 24 часов.",
+        reply_markup=user_menu())
+
+    log_chat = s("log_chat_id").strip()
+    support_topic = s("log_topic_support").strip()
+    tid = int(support_topic) if support_topic.isdigit() and int(support_topic) > 0 else None
+
+    if s("log_enabled") == "1" and log_chat.lstrip("-").isdigit():
+        chat_id = int(log_chat)
+        try:
+            await m.bot.send_message(
+                chat_id,
+                f"📞 <b>ОБРАЩЕНИЕ В ПОДДЕРЖКУ</b>\n{HR}\n"
+                f"👤 <code>{uid}</code> @{uname}\n"
+                f"🪪 {html.escape(fname)}\n{HR}\n"
+                f"{html.escape(text_body) if text_body else '<i>вложение ниже</i>'}",
+                message_thread_id=tid,
+                parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.warning(f"Не отправил лог поддержки: {e}")
+
+        if m.photo or m.video or m.document or m.voice or m.audio:
+            try:
+                await m.bot.forward_message(
+                    chat_id=chat_id,
+                    from_chat_id=m.chat.id,
+                    message_id=m.message_id,
+                    message_thread_id=tid)
+            except Exception as e:
+                logger.warning(f"Не переслал вложение из поддержки: {e}")
+
+
+# --- faq / news ---
 @user.callback_query(F.data == "faq")
 @autoclose
 async def faq(cb: CallbackQuery):
@@ -817,6 +885,7 @@ async def news(cb: CallbackQuery):
                    reply_markup=kb(back="main"))
 
 
+# --- каталог ---
 @user.callback_query(F.data == "cats")
 @autoclose
 async def cats(cb: CallbackQuery):
@@ -1364,6 +1433,33 @@ async def mark_paid(cb: CallbackQuery):
     await cb.answer("Выплачено")
 
 
+# --- ответ поддержки через reply ---
+@adm.message(F.chat.type.in_({"group", "supergroup"}), F.reply_to_message)
+async def admin_reply_support(m: Message):
+    log_chat = s("log_chat_id").strip()
+    if not log_chat.lstrip("-").isdigit() or m.chat.id != int(log_chat):
+        return
+    support_topic = s("log_topic_support").strip()
+    if not support_topic.isdigit() or m.message_thread_id != int(support_topic):
+        return
+    replied_text = m.reply_to_message.text or ""
+    match = re.search(r"👤 <code>(\d+)</code>", replied_text)
+    if not match:
+        return
+    uid = int(match.group(1))
+    reply_text = (m.text or "").strip()
+    if not reply_text:
+        return await m.reply("Нужен текст ответа.")
+    try:
+        await m.bot.send_message(
+            uid,
+            f"📞 <b>Ответ поддержки</b>\n{HR}\n{html.escape(reply_text)}",
+            parse_mode=ParseMode.HTML)
+        await m.reply("✅ Отправлено юзеру.")
+    except Exception as e:
+        await m.reply(f"❌ Не доставлено: {html.escape(str(e)[:200])}")
+
+
 # --- оформление ---
 @adm.callback_query(F.data == "adm:style:menu")
 @admin_only
@@ -1601,7 +1697,7 @@ async def log_test(cb: CallbackQuery):
     await cb.answer(f"Отправил тесты в {sent} топиков")
 
 
-# --- настройки чисел/ссылок ---
+# --- настройки ---
 @adm.callback_query(F.data == "adm:settings")
 @admin_only
 async def settings_menu(cb: CallbackQuery, state: FSMContext):
@@ -1612,7 +1708,6 @@ async def settings_menu(cb: CallbackQuery, state: FSMContext):
                f"⏳ Дней холда: <b>{s('hold_days')}</b>\n"
                f"🚦 Лимит заявок/день: <b>{s('daily_limit')}</b>\n"
                f"📢 Новости: <code>{html.escape(s('news_url'))}</code>\n"
-               f"📞 Поддержка: <code>{html.escape(s('support_username'))}</code>\n"
                f"⭐ Звёзды: <code>{html.escape(s('stars_url'))}</code>\n\n"
                "Тапни на параметр, чтобы изменить 👇",
                reply_markup=settings_kb())
@@ -1641,7 +1736,7 @@ async def set_finish(m: Message, state: FSMContext):
     key = d["set_key"]
     value = (m.text or "").strip()
 
-    if key in ("min_views", "hold_days", "daily_limit", "stars_price_rub"):
+    if key in ("min_views", "hold_days", "daily_limit"):
         try:
             int(value)
         except ValueError:
