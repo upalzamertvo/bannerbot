@@ -642,18 +642,38 @@ async def send(obj, text_: str, **kw):
             return await obj.answer(_plain(text_), **kw)
         raise
 
+
 async def edit(msg, text_: str, **kw):
     try:
         return await msg.edit_text(text_, **kw)
     except Exception as e:
         m = str(e).lower()
+        
+        # Если редактировать нельзя (нет текста, это фото/видео/документ)
+        if "there is no text in the message to edit" in m:
+            try:
+                # Пытаемся удалить старое сообщение
+                await msg.delete()
+            except Exception:
+                pass  # Если не удалось удалить (например, старше 48 часов), просто игнорируем
+            
+            # Отправляем новое сообщение в тот же чат
+            try:
+                return await msg.answer(text_, **kw)
+            except Exception as e2:
+                logger.error(f"Не удалось отправить новое сообщение: {e2}")
+                return None
+                
+        # Если текст не изменился — просто игнорируем
         if "message is not modified" in m:
             return None
+            
+        # Если битый HTML — пробуем отправить без тегов
         if _html_err(e):
             logger.warning(f"Битый HTML в edit → plain: {str(e)[:120]}")
-            return await msg.edit_text(_plain(text_), **kw)
+            return await msg.answer(_plain(text_), **kw)
+            
         raise
-
 
 def kb(*rows, back=None, cancel=None) -> InlineKeyboardMarkup:
     buttons = []
