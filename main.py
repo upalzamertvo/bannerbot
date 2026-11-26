@@ -800,13 +800,17 @@ class SubscriptionMW(BaseMiddleware):
 # =========================================================
 def user_menu() -> InlineKeyboardMarkup:
     stars_url = s("stars_url").strip() or "https://t.me/wsquadstars_bot"
+    news_url = s("news_url").strip()
+    url_row = [("⭐ Купить звёзды", stars_url)]
+    if news_url:
+        url_row.insert(0, ("📢 Новости", news_url))
     return kb(
         [(s("btn_catalog"), "cats"), (s("btn_payout"), "payout_start")],
         [(s("btn_my_payouts"), "my_payouts"), ("💰 Кошелёк", "wallet")],
         [("📊 Статистика", "my_stats"), ("🎁 Рефералка", "referral")],
-        [("📞 Поддержка", "support"), ("❓ FAQ", "faq")],
-        [("⭐ Купить звёзды", stars_url),("📢 Новости", "news")],
+        [("❓ FAQ", "faq"), ("📞 Поддержка", "support")],
         [(s("btn_rules"), "rules")],
+        url_row,
     )
 
 def admin_menu() -> InlineKeyboardMarkup:
