@@ -2,3 +2,4 @@ aiogram>=3.7,<4
 python-dotenv>=1.0
 aiogram>=3.0.0
 python-dotenv
+cryptopay-python-sdk
