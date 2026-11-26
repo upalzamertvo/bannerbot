@@ -2,7 +2,9 @@
 VPN Payout Bot — Wcoins edition.
 - Wcoins: 10 Wcoins = 1 USDT
 - Начисление: 10 Wcoins за 1000 просмотров, бонусы за рефералов
-- Вывод USDT вручную через чек @CryptoBot
+- Вывод: USDT (чек @CryptoBot) ИЛИ Telegram Stars (по курсу 1.8 ₽/⭐)
+- Динамический курс USDT/RUB через CryptoBot API (fallback 100)
+- FAQ на 2 страницы
 - Отдельный лог-топик для выводов
 - Обязательная подписка
 - Поддержка: ЛС админа + лог в топик
@@ -14,6 +16,7 @@ import os
 import pickle
 import re
 import sqlite3
+import time
 from datetime import datetime
 from functools import wraps
 from logging.handlers import RotatingFileHandler
@@ -47,12 +50,17 @@ def _ints(raw: str) -> list[int]:
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = _ints(os.getenv("ADMIN_IDS", ""))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
+CRYPTO_PAY_TOKEN = os.getenv("CRYPTO_PAY_TOKEN", "")
 
 # Фиксированные константы Wcoins
-WCOIN_RATE = 10            # 10 Wcoins = 1 USDT
-WCOIN_PER_1K_VIEWS = 10    # 10 Wcoins за 1000 просмотров
-WCOIN_MIN_WITHDRAW = 10    # минимум 10 Wcoins = 1 USDT
-WCOIN_MAX_WITHDRAW = 100000 # максимум 100000 Wcoins = 10000 USDT (защита)
+WCOIN_RATE = 10             # 10 Wcoins = 1 USDT
+WCOIN_PER_1K_VIEWS = 10
+WCOIN_MIN_WITHDRAW = 10
+WCOIN_MAX_WITHDRAW = 100000
+
+# Курс звезды и fallback USDT/RUB (управляются через админку)
+STAR_PRICE_RUB_FALLBACK = 1.8
+USDT_RUB_FALLBACK = 100.0
 
 LOG_CATS = {
     "payouts":  ("💰", "Заявки"),
@@ -75,6 +83,11 @@ WD_STATUSES = {
     "pending":  "⏳ В обработке",
     "paid":     "✅ Выплачен",
     "rejected": "❌ Отклонён",
+}
+
+CURRENCY_LABELS = {
+    "usdt":  "💵 USDT",
+    "stars": "⭐ Stars",
 }
 
 DEFAULTS = {
@@ -118,7 +131,7 @@ DEFAULTS = {
         "<b>💰 Wcoins</b>\n"
         "• 10 Wcoins за 1000 просмотров\n"
         "• 10 Wcoins = 1 USDT\n"
-        "• Вывод в USDT через @CryptoBot (чек)\n"
+        "• Вывод в USDT через @CryptoBot (чек) ИЛИ в Telegram Stars\n"
         "• Минимум вывода: 10 Wcoins (1 USDT)\n\n"
         "<b>🚫 За что бан</b>\n"
         "Накрутка, обрезка баннера, удаление ролика — без выплат."
@@ -131,24 +144,40 @@ DEFAULTS = {
         "<i>Чем подробнее опишешь проблему, тем быстрее поможем.</i>"
     ),
     "faq_text": (
-        "❓ <b>ЧАСТЫЕ ВОПРОСЫ</b>\n"
+        "❓ <b>ЧАСТЫЕ ВОПРОСЫ</b> (1/2)\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "<b>Что такое Wcoins?</b>\n"
         "Внутренняя валюта. 10 Wcoins = 1 USDT.\n\n"
         "<b>Как получить Wcoins?</b>\n"
         "10 Wcoins за каждые 1000 просмотров одобренной заявки.\n\n"
         "<b>Как вывести?</b>\n"
-        "Кошелёк → Вывести USDT → админ отправит чек через @CryptoBot.\n\n"
+        "Кошелёк → Вывести → выбери USDT или Telegram Stars.\n\n"
         "<b>Минимум вывода?</b>\n"
-        "10 Wcoins (1 USDT).\n\n"
-        "<b>Почему нужен @CryptoBot?</b>\n"
-        "Через него приходят чеки в USDT. Запусти его хотя бы раз.\n\n"
+        "10 Wcoins (1 USDT или ≈10 Stars).\n\n"
         "<b>Когда придёт вывод?</b>\n"
         "В течение 24 часов после запроса."
+    ),
+    "faq_text_2": (
+        "❓ <b>ЧАСТЫЕ ВОПРОСЫ</b> (2/2)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>Почему нужен @CryptoBot?</b>\n"
+        "Через него приходят чеки в USDT. Запусти хотя бы раз.\n\n"
+        "<b>Что такое Telegram Stars?</b>\n"
+        "Внутренняя валюта Telegram. Можно вывести звёздами на аккаунт.\n\n"
+        "<b>Сколько звёзд дадут?</b>\n"
+        "1 звезда = 1,8 ₽. Пересчёт из Wcoins автоматический по курсу USDT/RUB.\n\n"
+        "<b>Почему отклонили заявку?</b>\n"
+        "Причина указана в «Мои заявки». Исправь и подай снова.\n\n"
+        "<b>Что такое холд?</b>\n"
+        "Период проверки просмотров после одобрения (14 дней).\n\n"
+        "<b>Как вставить баннер?</b>\n"
+        "Смотри гайд в канале новостей."
     ),
     "news_url": "https://t.me/wstarsforsale",
     "stars_url": "https://t.me/wsquadstars_bot",
     "support_chat_id": "",
+    "star_price_rub": "1.8",
+    "usdt_rub": "100",
     "log_enabled": "0", "log_chat_id": "",
     "log_topic_payouts": "", "log_topic_withdraw": "",
     "log_topic_banners": "", "log_topic_users": "",
@@ -162,7 +191,7 @@ GROUPS = {
                 ["title_main", "title_catalog", "title_payout",
                  "title_my_payouts", "title_rules", "title_admin"]),
     "texts":   ("📝 Большие тексты",
-                ["welcome_text", "rules_text", "faq_text", "support_text"]),
+                ["welcome_text", "rules_text", "faq_text", "faq_text_2", "support_text"]),
 }
 
 LABELS = {
@@ -170,7 +199,8 @@ LABELS = {
     "daily_limit": "🚦 Лимит заявок в день",
     "welcome_text": "👋 Приветствие ({name} = имя)",
     "rules_text": "📋 Правила и тарифы",
-    "faq_text": "❓ Текст FAQ",
+    "faq_text": "❓ Текст FAQ (стр. 1)",
+    "faq_text_2": "❓ Текст FAQ (стр. 2)",
     "support_text": "📞 Текст поддержки",
     "btn_catalog": "🗂 Кнопка «Каталог»", "btn_payout": "💰 Кнопка «Подать заявку»",
     "btn_my_payouts": "📊 Кнопка «Мои заявки»", "btn_rules": "📋 Кнопка «Правила»",
@@ -183,6 +213,8 @@ LABELS = {
     "news_url": "📢 URL канала новостей",
     "stars_url": "⭐ Ссылка на покупку звёзд",
     "support_chat_id": "📞 ID получателя обращений",
+    "star_price_rub": "⭐ Цена 1 звезды (₽)",
+    "usdt_rub": "💵 Курс USDT/RUB (fallback)",
     "log_chat_id": "🎯 ID группы для логов",
     "log_topic_payouts": "💰 ID темы «Заявки»",
     "log_topic_withdraw": "📤 ID темы «Вывод Wcoins»",
@@ -279,11 +311,20 @@ def init_db():
             invite_link TEXT,
             added_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
-    # Миграция: если старая таблица users без wcoins
+    # Миграция users.wcoins
     try:
         cols = [r["name"] for r in _all("PRAGMA table_info(users)")]
         if "wcoins" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN wcoins INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    # Миграция withdraw_requests.currency
+    try:
+        cols = [r["name"] for r in _all("PRAGMA table_info(withdraw_requests)")]
+        if "currency" not in cols:
+            conn.execute(
+                "ALTER TABLE withdraw_requests ADD COLUMN currency TEXT DEFAULT 'usdt'"
+            )
     except Exception:
         pass
 
@@ -303,6 +344,12 @@ def s_int(key: str, default: int = 0) -> int:
     except ValueError:
         return default
 
+def s_float(key: str, default: float = 0.0) -> float:
+    try:
+        return float(s(key, str(default)).replace(",", "."))
+    except ValueError:
+        return default
+
 def s_set(key: str, value: str):
     _x("INSERT INTO settings(key,value) VALUES(?,?) "
        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
@@ -316,6 +363,75 @@ def t(key: str, default: str = "", **kw) -> str:
         return val.format(**kw)
     except (KeyError, IndexError):
         return val
+
+
+# =========================================================
+# ДИНАМИЧЕСКИЙ КУРС USDT/RUB (CryptoBot API)
+# =========================================================
+_cp_client = None
+_usdt_rub_cache = {"rate": USDT_RUB_FALLBACK, "ts": 0.0}
+
+
+async def _get_cp():
+    """Ленивая инициализация async-клиента CryptoBot."""
+    global _cp_client
+    if _cp_client is None and CRYPTO_PAY_TOKEN:
+        try:
+            from crypto_pay_api import CryptoPayAsync, CryptoPayConfig
+            _cp_client = CryptoPayAsync(CryptoPayConfig(token=CRYPTO_PAY_TOKEN))
+        except ImportError:
+            logger.warning("cryptopay-python-sdk не установлен, курс фиксированный")
+        except Exception as e:
+            logger.warning(f"Ошибка инициализации CryptoBot: {e}")
+    return _cp_client
+
+
+async def fetch_usdt_rub() -> float:
+    """Курс USDT/RUB с кэшем на 10 минут. Fallback — последний известный / из настроек."""
+    now = time.time()
+    if now - _usdt_rub_cache["ts"] < 600:      # 10 минут
+        return _usdt_rub_cache["rate"]
+
+    cp = await _get_cp()
+    if cp:
+        try:
+            rates = await cp.get_exchange_rates()
+            for r in rates:
+                if (getattr(r, "source", None) == "USDT"
+                        and getattr(r, "target", None) == "RUB"):
+                    rate = float(r.rate)
+                    _usdt_rub_cache["rate"] = rate
+                    _usdt_rub_cache["ts"] = now
+                    return rate
+        except Exception as e:
+            logger.warning(f"Не удалось получить курс USDT/RUB: {e}")
+
+    # Fallback: настройка из админки (по умолчанию 100)
+    fallback = s_float("usdt_rub", USDT_RUB_FALLBACK)
+    _usdt_rub_cache["rate"] = fallback
+    return fallback
+
+
+def star_price_rub() -> float:
+    return s_float("star_price_rub", STAR_PRICE_RUB_FALLBACK)
+
+
+def stars_to_rub(stars: int) -> float:
+    return stars * star_price_rub()
+
+
+def wcoins_to_usdt_str(wcoins: int) -> str:
+    usdt = wcoins / WCOIN_RATE
+    if usdt == int(usdt):
+        return str(int(usdt))
+    return f"{usdt:.2f}"
+
+
+async def wcoins_to_stars(wcoins: int) -> int:
+    """10 Wcoins = 1 USDT → рубли по динамическому курсу → звёзды по star_price_rub."""
+    usdt = wcoins / WCOIN_RATE
+    rub = usdt * await fetch_usdt_rub()
+    return max(0, int(rub / star_price_rub()))
 
 
 # --- banners ---
@@ -451,9 +567,11 @@ def wc_history(uid: int, limit: int = 20):
 
 
 # --- withdraws ---
-def wd_create(uid: int, wcoins: int) -> int:
-    return _x("INSERT INTO withdraw_requests(user_id,wcoins) VALUES(?,?)",
-              (uid, wcoins)).lastrowid
+def wd_create(uid: int, wcoins: int, currency: str = "usdt") -> int:
+    return _x(
+        "INSERT INTO withdraw_requests(user_id,wcoins,currency) VALUES(?,?,?)",
+        (uid, wcoins, currency),
+    ).lastrowid
 
 def wd_get(rid: int):
     return _one("SELECT * FROM withdraw_requests WHERE id=?", (rid,))
@@ -474,13 +592,6 @@ def wd_set(rid: int, status: str, admin_id: int, reason: str = None):
     _x("UPDATE withdraw_requests SET status=?,admin_id=?,reason=?,"
        "reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
        (status, admin_id, reason, rid))
-
-
-def wcoins_to_usdt_str(wcoins: int) -> str:
-    usdt = wcoins / WCOIN_RATE
-    if usdt == int(usdt):
-        return str(int(usdt))
-    return f"{usdt:.2f}"
 
 
 # --- channels ---
@@ -712,14 +823,11 @@ class SubscriptionMW(BaseMiddleware):
     async def __call__(self, handler, event, data):
         if not ch_count():
             return await handler(event, data)
-
         user = data.get("event_from_user")
         if not user:
             return await handler(event, data)
-
         if is_admin(user.id):
             return await handler(event, data)
-
         if isinstance(event, CallbackQuery) and event.data == "check_sub":
             return await handler(event, data)
         if isinstance(event, Message):
@@ -766,7 +874,7 @@ def admin_menu() -> InlineKeyboardMarkup:
     return kb(
         ("📊 Статистика", "adm:stats"),
         ("📋 Заявки", "adm:payouts:pending"),
-        ("📤 Выводы Wcoins", "adm:withdraws"),
+        ("📤 Выводы", "adm:withdraws"),
         ("🪙 Начислить Wcoins", "adm:wc_add"),
         ("🗂 Баннеры", "adm:banners:1"),
         ("📢 Каналы (подписка)", "adm:channels"),
@@ -820,6 +928,8 @@ def settings_kb():
         ("📢 URL новостей", "adm:set:news_url"),
         ("⭐ Ссылка на покупку звёзд", "adm:set:stars_url"),
         ("📞 ID получателя обращений", "adm:set:support_chat_id"),
+        ("⭐ Цена 1 звезды (₽)", "adm:set:star_price_rub"),
+        ("💵 Курс USDT/RUB (fallback)", "adm:set:usdt_rub"),
         back="adm:main",
     )
 
@@ -899,6 +1009,7 @@ class SupportFSM(StatesGroup):
 
 
 class WithdrawFSM(StatesGroup):
+    currency = State()
     amount = State()
     confirm = State()
 
@@ -1019,13 +1130,18 @@ async def wallet(cb: CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
     balance = wc_balance(uid)
     usdt_str = wcoins_to_usdt_str(balance)
+    stars = await wcoins_to_stars(balance)
+    rate = await fetch_usdt_rub()
     body = (f"💰 <b>WCOINS КОШЕЛЁК</b>\n{HR}\n"
-            f"Баланс: <b>{balance} Wcoins</b>\n"
-            f"≈ <b>{usdt_str} USDT</b>\n"
+            f"Баланс: <b>{balance} Wcoins</b>\n\n"
+            f"💵 ≈ <b>{usdt_str} USDT</b>\n"
+            f"⭐ ≈ <b>{stars} Stars</b>\n\n"
             f"Курс: {WCOIN_RATE} Wcoins = 1 USDT\n"
+            f"USDT/RUB: ≈ {rate:.2f} ₽\n"
+            f"1 звезда = {star_price_rub()} ₽\n"
             f"Мин. вывод: {WCOIN_MIN_WITHDRAW} Wcoins")
     markup = kb(
-        ("📤 Вывести USDT", "withdraw_start"),
+        ("📤 Вывести", "withdraw_start"),
         ("📜 История", "wcoin_history"),
         ("📋 Мои выводы", "my_withdraws"),
         back="main")
@@ -1069,10 +1185,16 @@ async def my_withdraws(cb: CallbackQuery):
     lines = [f"📋 <b>МОИ ВЫВОДЫ</b>\n{HR}\n"]
     for r in rows:
         st = WD_STATUSES.get(r["status"], r["status"])
-        usdt = wcoins_to_usdt_str(r["wcoins"])
+        cur = r.get("currency", "usdt") or "usdt"
+        if cur == "stars":
+            stars = await wcoins_to_stars(r["wcoins"])
+            rub = stars_to_rub(stars)
+            result = f"⭐ {stars} Stars (≈ {rub:.0f} ₽)"
+        else:
+            result = f"💵 {wcoins_to_usdt_str(r['wcoins'])} USDT"
         lines.append(
             f"<b>#{r['id']}</b> — {st}\n"
-            f"🪙 {r['wcoins']} Wcoins → {usdt} USDT\n"
+            f"🪙 {r['wcoins']} Wcoins → {result}\n"
             f"📅 {r['created_at'][:16]}\n"
             + (f"📝 {html.escape(r['reason'])}\n" if r["reason"] else "")
             + f"{'━' * 15}\n")
@@ -1082,7 +1204,7 @@ async def my_withdraws(cb: CallbackQuery):
     await edit(cb.message, text_, reply_markup=kb(back="wallet"))
 
 
-# --- вывод ---
+# --- вывод (USDT или Stars) ---
 @user.callback_query(F.data == "withdraw_start")
 async def withdraw_start(cb: CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
@@ -1096,12 +1218,46 @@ async def withdraw_start(cb: CallbackQuery, state: FSMContext):
         return await cb.answer(f"Минимум {WCOIN_MIN_WITHDRAW} Wcoins для вывода",
                                show_alert=True)
 
-    await state.set_state(WithdrawFSM.amount)
+    await state.set_state(WithdrawFSM.currency)
     await state.update_data(wc_balance=balance)
     await edit(cb.message,
-               f"📤 <b>ВЫВОД USDT</b>\n{HR}\n"
+               f"📤 <b>ВЫВОД</b>\n{HR}\n"
                f"Доступно: <b>{balance} Wcoins</b>\n"
-               f"Курс: {WCOIN_RATE} Wcoins = 1 USDT\n"
+               f"Курс: {WCOIN_RATE} Wcoins = 1 USDT\n\n"
+               f"<b>Выбери валюту:</b>\n"
+               f"• 💵 USDT — через @CryptoBot (чек)\n"
+               f"• ⭐ Stars — на аккаунт Telegram\n"
+               f"  (1 звезда = {star_price_rub()} ₽)",
+               reply_markup=kb(
+                   ("💵 USDT", "withdraw_cur:usdt"),
+                   ("⭐ Stars", "withdraw_cur:stars"),
+                   cancel="cancel_fsm"))
+    await cb.answer()
+
+
+@user.callback_query(StateFilter(WithdrawFSM.currency),
+                     F.data.startswith("withdraw_cur:"))
+async def withdraw_currency(cb: CallbackQuery, state: FSMContext):
+    currency = cb.data.split(":", 1)[1]
+    if currency not in ("usdt", "stars"):
+        return await cb.answer("Неверная валюта", show_alert=True)
+
+    d = await state.get_data()
+    balance = d["wc_balance"]
+
+    if currency == "usdt":
+        hint = f"Курс: {WCOIN_RATE} Wcoins = 1 USDT"
+    else:
+        rate = await fetch_usdt_rub()
+        hint = (f"Курс: {WCOIN_RATE} Wcoins = 1 USDT ≈ {rate:.2f} ₽\n"
+                f"1 звезда = {star_price_rub()} ₽")
+
+    await state.update_data(currency=currency)
+    await state.set_state(WithdrawFSM.amount)
+    await edit(cb.message,
+               f"📤 <b>ВЫВОД: {CURRENCY_LABELS[currency]}</b>\n{HR}\n"
+               f"Доступно: <b>{balance} Wcoins</b>\n"
+               f"{hint}\n"
                f"Минимум: {WCOIN_MIN_WITHDRAW} Wcoins\n\n"
                f"Сколько Wcoins вывести?",
                reply_markup=cancel_user())
@@ -1117,6 +1273,7 @@ async def withdraw_amount(m: Message, state: FSMContext):
 
     d = await state.get_data()
     balance = d["wc_balance"]
+    currency = d.get("currency", "usdt")
 
     if amount < WCOIN_MIN_WITHDRAW:
         return await m.answer(f"Минимум {WCOIN_MIN_WITHDRAW} Wcoins.")
@@ -1125,16 +1282,24 @@ async def withdraw_amount(m: Message, state: FSMContext):
     if amount > balance:
         return await m.answer(f"У тебя только {balance} Wcoins.")
 
-    usdt_str = wcoins_to_usdt_str(amount)
+    if currency == "usdt":
+        result_str = f"{wcoins_to_usdt_str(amount)} USDT"
+    else:
+        stars = await wcoins_to_stars(amount)
+        rub = stars_to_rub(stars)
+        result_str = f"{stars} Stars (≈ {rub:.0f} ₽)"
+
     await state.update_data(wc_amount=amount)
     await state.set_state(WithdrawFSM.confirm)
     await m.answer(
         f"📤 <b>ПОДТВЕРДИ ВЫВОД</b>\n{HR}\n"
         f"Списать: <b>{amount} Wcoins</b>\n"
-        f"Получишь: <b>{usdt_str} USDT</b>\n"
+        f"Получишь: <b>{result_str}</b>\n"
         f"{HR}\n"
-        f"Админ отправит USDT <b>чеком через @CryptoBot</b>.\n"
-        f"Убедись, что ты запускал @CryptoBot — иначе чек не активируется.",
+        + ("Админ отправит USDT <b>чеком через @CryptoBot</b>.\n"
+           "Убедись, что ты запускал @CryptoBot."
+           if currency == "usdt" else
+           "Админ отправит <b>Telegram Stars</b> на твой аккаунт подарком."),
         reply_markup=kb(
             ("✅ Подтвердить", "withdraw_confirm"),
             ("❌ Отмена", "cancel_fsm")))
@@ -1145,6 +1310,7 @@ async def withdraw_confirm(cb: CallbackQuery, state: FSMContext):
     d = await state.get_data()
     uid = cb.from_user.id
     amount = d.get("wc_amount")
+    currency = d.get("currency", "usdt")
 
     if not amount:
         await state.clear()
@@ -1158,28 +1324,41 @@ async def withdraw_confirm(cb: CallbackQuery, state: FSMContext):
         await state.clear()
         return await cb.answer("Недостаточно Wcoins", show_alert=True)
 
-    rid = wd_create(uid, amount)
+    rid = wd_create(uid, amount, currency)
     await state.clear()
 
-    usdt_str = wcoins_to_usdt_str(amount)
+    if currency == "usdt":
+        result_str = f"{wcoins_to_usdt_str(amount)} USDT"
+    else:
+        stars = await wcoins_to_stars(amount)
+        result_str = f"{stars} Stars"
+
     await edit(cb.message,
                f"✅ <b>Заявка на вывод #{rid}</b>\n{HR}\n"
                f"Списано: <b>{amount} Wcoins</b>\n"
-               f"К получению: <b>{usdt_str} USDT</b>\n\n"
-               f"Админ отправит чек через @CryptoBot в течение 24 часов.",
+               f"К получению: <b>{result_str}</b>\n\n"
+               f"Админ обработает в течение 24 часов.",
                reply_markup=user_menu())
 
     await log_event(cb.bot, "withdraw",
                     f"📤 <b>Заявка на вывод #{rid}</b>\n{HR}\n"
                     f"👤 <code>{uid}</code> @{cb.from_user.username or '—'}\n"
-                    f"🪙 {amount} Wcoins → {usdt_str} USDT")
+                    f"🪙 {amount} Wcoins → {result_str}\n"
+                    f"💱 {currency.upper()}")
 
     if ADMIN_IDS:
+        if currency == "usdt":
+            action = f"Создай чек в @CryptoBot на {wcoins_to_usdt_str(amount)} USDT и отправь юзеру."
+        else:
+            stars = await wcoins_to_stars(amount)
+            action = f"Отправь <b>{stars} Stars</b> юзеру <code>{uid}</code> подарком."
+
         await _notify_user(cb.bot, ADMIN_IDS[0],
                            f"📤 <b>Новая заявка на вывод #{rid}</b>\n{HR}\n"
                            f"👤 <code>{uid}</code> @{cb.from_user.username or '—'}\n"
-                           f"🪙 {amount} Wcoins → {usdt_str} USDT\n\n"
-                           f"Создай чек в @CryptoBot на {usdt_str} USDT и отправь юзеру.")
+                           f"🪙 {amount} Wcoins → {result_str}\n"
+                           f"💱 {currency.upper()}\n\n"
+                           f"{action}")
 
     await cb.answer("Заявка создана")
 
@@ -1264,12 +1443,21 @@ async def support_message(m: Message, state: FSMContext):
         f"{html.escape(text_body) if text_body else '<i>вложение (в ЛС админу)</i>'}")
 
 
-# --- faq / news ---
+# --- faq (2 страницы) / news ---
 @user.callback_query(F.data == "faq")
 @autoclose
-async def faq(cb: CallbackQuery):
+async def faq_page1(cb: CallbackQuery):
     if cb.message:
-        await edit(cb.message, s("faq_text"), reply_markup=kb(back="main"))
+        await edit(cb.message, s("faq_text"),
+                   reply_markup=kb(("➡️ Дальше", "faq:2"), back="main"))
+
+
+@user.callback_query(F.data == "faq:2")
+@autoclose
+async def faq_page2(cb: CallbackQuery):
+    if cb.message:
+        await edit(cb.message, s("faq_text_2"),
+                   reply_markup=kb(("⬅️ Назад", "faq"), back="main"))
 
 
 @user.callback_query(F.data == "news")
@@ -1367,6 +1555,7 @@ async def my_stats(cb: CallbackQuery):
         "SELECT COALESCE(SUM(views_claim),0) s FROM payouts WHERE user_id=?", (uid,))["s"]
     balance = wc_balance(uid)
     usdt_str = wcoins_to_usdt_str(balance)
+    stars = await wcoins_to_stars(balance)
     body = (f"📊 <b>ТВОЯ СТАТИСТИКА</b>\n{HR}\n"
             f"⏳ На проверке: <b>{p.get('pending', 0)}</b>\n"
             f"✅ Одобрено: <b>{p.get('approved', 0)}</b>\n"
@@ -1375,7 +1564,8 @@ async def my_stats(cb: CallbackQuery):
             f"{HR}\n"
             f"👀 Заявлено просмотров: <b>{total_views:,}</b>\n"
             f"🎁 Приглашено друзей: <b>{ref_count(uid)}</b>\n"
-            f"💰 Баланс: <b>{balance} Wcoins</b> (≈ {usdt_str} USDT)")
+            f"💰 Баланс: <b>{balance} Wcoins</b>\n"
+            f"   ≈ {usdt_str} USDT / ≈ {stars} Stars")
     if cb.message:
         await edit(cb.message, body, reply_markup=kb(back="main"))
 
@@ -1763,7 +1953,6 @@ async def approve(cb: CallbackQuery):
         pass
     await cb.message.answer(f"✅ Заявка #{pid} одобрена (холд {hold} дней).")
 
-    # начисление Wcoins за просмотры
     earned = (r["views_claim"] // 1000) * WCOIN_PER_1K_VIEWS
     if earned > 0:
         wc_add(r["user_id"], earned, "payout", pid)
@@ -1848,7 +2037,7 @@ async def mark_paid(cb: CallbackQuery):
     await cb.answer("Выплачено")
 
 
-# --- выводы Wcoins ---
+# --- выводы Wcoins (USDT/Stars) ---
 @adm.callback_query(F.data == "adm:withdraws")
 @admin_only
 async def withdraws_list(cb: CallbackQuery):
@@ -1859,10 +2048,16 @@ async def withdraws_list(cb: CallbackQuery):
     lines = [f"📤 <b>ЗАЯВКИ НА ВЫВОД</b>\n{HR}\n"]
     buttons = []
     for r in rows[:10]:
-        usdt = wcoins_to_usdt_str(r["wcoins"])
+        cur = r.get("currency", "usdt") or "usdt"
+        if cur == "stars":
+            stars = await wcoins_to_stars(r["wcoins"])
+            rub = stars_to_rub(stars)
+            result = f"⭐ {stars} Stars (≈ {rub:.0f} ₽)"
+        else:
+            result = f"💵 {wcoins_to_usdt_str(r['wcoins'])} USDT"
         lines.append(
             f"#{r['id']} — <code>{r['user_id']}</code>\n"
-            f"  🪙 {r['wcoins']} Wcoins → {usdt} USDT")
+            f"  🪙 {r['wcoins']} Wcoins → {result}")
         buttons.append([(f"✅ #{r['id']}", f"adm:wd_paid:{r['id']}"),
                         (f"❌ #{r['id']}", f"adm:wd_reject:{r['id']}")])
     buttons.append([("⬅️ Назад", "adm:main")])
@@ -1878,16 +2073,27 @@ async def withdraw_paid(cb: CallbackQuery):
     if not r or r["status"] != "pending":
         return await cb.answer("Уже обработана", show_alert=True)
     wd_set(rid, "paid", cb.from_user.id)
-    usdt = wcoins_to_usdt_str(r["wcoins"])
+
+    cur = r.get("currency", "usdt") or "usdt"
+    if cur == "stars":
+        stars = await wcoins_to_stars(r["wcoins"])
+        result_str = f"{stars} Stars"
+        user_msg = (f"💰 <b>Вывод #{rid} выполнен!</b>\n{HR}\n"
+                    f"Отправлено: <b>{result_str}</b>\n"
+                    f"Проверь подарки от бота.")
+    else:
+        result_str = f"{wcoins_to_usdt_str(r['wcoins'])} USDT"
+        user_msg = (f"💰 <b>Вывод #{rid} выполнен!</b>\n{HR}\n"
+                    f"Отправлено: <b>{result_str}</b>\n"
+                    f"Проверь @CryptoBot → Чеки.")
+
     await cb.answer(f"Вывод #{rid} закрыт")
-    await _notify_user(cb.bot, r["user_id"],
-                       f"💰 <b>Вывод #{rid} выполнен!</b>\n{HR}\n"
-                       f"Отправлено: <b>{usdt} USDT</b>\n"
-                       f"Проверь @CryptoBot → Чеки.")
+    await _notify_user(cb.bot, r["user_id"], user_msg)
     await log_event(cb.bot, "withdraw",
                     f"✅ <b>Вывод #{rid} выплачен</b>\n"
                     f"👤 <code>{r['user_id']}</code>\n"
-                    f"🪙 {r['wcoins']} Wcoins → {usdt} USDT\n"
+                    f"🪙 {r['wcoins']} Wcoins → {result_str}\n"
+                    f"💱 {cur.upper()}\n"
                     f"👨‍💼 <code>{cb.from_user.id}</code>")
 
 
@@ -2159,7 +2365,7 @@ async def log_menu(cb: CallbackQuery, state: FSMContext):
                f"Группа: <code>{chat}</code>\n\n"
                "<b>Темы:</b>\n"
                "• 💰 Заявки — новые заявки, одобрения, отказы\n"
-               "• 📤 Выводы — запросы на вывод USDT\n"
+               "• 📤 Выводы — запросы на вывод USDT/Stars\n"
                "• 🗂 Баннеры, 👤 Юзеры, ⚙️ Настройки, 🚨 Ошибки, 📞 Поддержка\n\n"
                "Тапни на параметр, чтобы изменить 👇",
                reply_markup=log_menu_kb())
@@ -2257,6 +2463,7 @@ async def log_test(cb: CallbackQuery):
 @admin_only
 async def settings_menu(cb: CallbackQuery, state: FSMContext):
     await state.clear()
+    rate = await fetch_usdt_rub()
     await edit(cb.message,
                f"⚙️ <b>НАСТРОЙКИ</b>\n{HR}\n"
                f"🔢 Мин. просмотры: <b>{s('min_views')}</b>\n"
@@ -2264,7 +2471,10 @@ async def settings_menu(cb: CallbackQuery, state: FSMContext):
                f"🚦 Лимит заявок/день: <b>{s('daily_limit')}</b>\n"
                f"📢 Новости: <code>{html.escape(s('news_url'))}</code>\n"
                f"⭐ Звёзды: <code>{html.escape(s('stars_url'))}</code>\n"
-               f"📞 Обращения: <code>{html.escape(s('support_chat_id') or '—')}</code>\n\n"
+               f"📞 Обращения: <code>{html.escape(s('support_chat_id') or '—')}</code>\n"
+               f"⭐ Цена звезды: <b>{star_price_rub()} ₽</b>\n"
+               f"💵 USDT/RUB: <b>{rate:.2f} ₽</b> "
+               f"<i>(fallback: {s('usdt_rub')} ₽)</i>\n\n"
                "Тапни на параметр, чтобы изменить 👇",
                reply_markup=settings_kb())
     await cb.answer()
@@ -2303,6 +2513,11 @@ async def set_finish(m: Message, state: FSMContext):
     if key == "support_chat_id":
         if value and not value.lstrip("-").isdigit():
             return await m.answer("Нужен числовой ID.")
+    if key in ("star_price_rub", "usdt_rub"):
+        try:
+            float(value.replace(",", "."))
+        except ValueError:
+            return await m.answer("Нужно число (можно с точкой).")
 
     old = s(key)
     s_set(key, value)
@@ -2413,21 +2628,26 @@ async def banner_cat(m: Message, state: FSMContext):
 async def channels_menu(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     chs = ch_all()
-    lines = ["📢 <b>ОБЯЗАТЕЛЬНАЯ ПОДПИСКА</b>", HR, ""]
     if not chs:
-        lines.append("Каналов нет. Бот работает без подписки.")
-    else:
-        for ch in chs:
-            lines.append(
-                f"• <b>{html.escape(ch['title'] or '—')}</b>\n"
-                f"  <code>{html.escape(ch['channel_id'])}</code>\n"
-                f"  {html.escape(ch['invite_link'] or '')}")
-    lines.append("\nТапни ❌, чтобы убрать 👇")
-    rows = [[(f"❌ {ch['title'] or ch['channel_id']}", f"adm:ch_del:{ch['id']}")]
-            for ch in chs]
-    rows.append([("➕ Добавить канал", "adm:ch_add")])
-    rows.append([("⬅️ Назад", "adm:main")])
-    await edit(cb.message, "\n".join(lines), reply_markup=kb(*rows))
+        body = ("📢 <b>КАНАЛЫ ПОДПИСКИ</b>\n"
+                f"{HR}\n\nПока ни одного канала нет.\n"
+                "Добавь канал, чтобы требовать подписку.")
+        rows = [("➕ Добавить канал", "adm:ch_add")]
+        rows.append(("⬅️ Назад", "adm:main"))
+        await edit(cb.message, body, reply_markup=kb(*rows))
+        return await cb.answer()
+    lines = [f"📢 <b>КАНАЛЫ ПОДПИСКИ</b>\n{HR}\n"]
+    buttons = []
+    for ch in chs:
+        lines.append(
+            f"<b>{html.escape(ch['title'] or ch['channel_id'])}</b>\n"
+            f"  ID: <code>{html.escape(ch['channel_id'])}</code>\n"
+            f"  🔗 {html.escape(ch['invite_link'] or '—')}")
+        buttons.append([(f"🗑 {ch['title'] or ch['channel_id']}",
+                         f"adm:ch_del:{ch['id']}")])
+    buttons.append([("➕ Добавить канал", "adm:ch_add")])
+    buttons.append([("⬅️ Назад", "adm:main")])
+    await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
     await cb.answer()
 
 
@@ -2439,123 +2659,162 @@ async def channel_del(cb: CallbackQuery):
     if not ch:
         return await cb.answer("Не найдено", show_alert=True)
     ch_del(cid)
-    await cb.answer("Канал удалён")
     await log_event(cb.bot, "settings",
-                    f"📢 <b>Канал удалён из подписки</b>\n"
-                    f"<code>{html.escape(ch['channel_id'])}</code>\n"
-                    f"👨‍💼 <code>{cb.from_user.id}</code>",
+                    f"🗑 <b>Канал удалён</b>\n"
+                    f"📢 {html.escape(ch['title'] or ch['channel_id'])}\n"
+                    f"👨‍💼 Админ: <code>{cb.from_user.id}</code>",
                     level="warning")
-    await edit(cb.message, "📢 Канал удалён. Открой меню заново.",
-               reply_markup=kb(back="adm:channels"))
+    await cb.answer("Канал удалён")
+    await channels_menu(cb, None) if False else None
+    # Перерисовываем меню каналов
+    chs = ch_all()
+    if not chs:
+        await edit(cb.message,
+                   f"📢 <b>КАНАЛЫ ПОДПИСКИ</b>\n{HR}\n\nСписок пуст.",
+                   reply_markup=kb(("➕ Добавить канал", "adm:ch_add"),
+                                   ("⬅️ Назад", "adm:main")))
+    else:
+        lines = [f"📢 <b>КАНАЛЫ ПОДПИСКИ</b>\n{HR}\n"]
+        buttons = []
+        for c in chs:
+            lines.append(
+                f"<b>{html.escape(c['title'] or c['channel_id'])}</b>\n"
+                f"  ID: <code>{html.escape(c['channel_id'])}</code>\n"
+                f"  🔗 {html.escape(c['invite_link'] or '—')}")
+            buttons.append([(f"🗑 {c['title'] or c['channel_id']}",
+                             f"adm:ch_del:{c['id']}")])
+        buttons.append([("➕ Добавить канал", "adm:ch_add")])
+        buttons.append([("⬅️ Назад", "adm:main")])
+        await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
 
 
 @adm.callback_query(F.data == "adm:ch_add")
 @admin_only
-async def channel_add_start(cb: CallbackQuery, state: FSMContext):
+async def channel_add(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.ch_id)
     await cb.message.answer(
-        f"📢 <b>ДОБАВЛЕНИЕ КАНАЛА</b>\n{HR}\n\n"
-        "Пришли <code>@username</code> канала или его ID (<code>-100...</code>).\n\n"
-        "⚠️ Бот должен быть админом в канале.",
+        "Пришли <b>ID канала</b> в формате <code>@channel</code> "
+        "или <code>-1001234567890</code>.\n\n"
+        "Бот должен быть админом канала, чтобы проверять подписку.",
         reply_markup=cancel_admin())
     await cb.answer()
 
 
 @adm.message(StateFilter(AdminFSM.ch_id))
 @admin_only
-async def channel_add_id(m: Message, state: FSMContext):
+async def channel_id_step(m: Message, state: FSMContext):
     raw = (m.text or "").strip()
     if not raw:
-        return await m.answer("Нужен @username или ID.")
-    channel_id = raw if (raw.startswith("@") or raw.lstrip("-").isdigit()) else f"@{raw}"
-    try:
-        chat = await m.bot.get_chat(channel_id)
-        title = chat.title or channel_id
-        invite = chat.invite_link or (f"https://t.me/{chat.username}" if chat.username else "")
-    except Exception as e:
-        return await m.answer(
-            f"❌ Не смог получить канал: {html.escape(str(e)[:200])}\n\n"
-            "Проверь, что бот админ в канале.")
-    await state.update_data(ch_id=channel_id, ch_title=title, ch_link=invite)
+        return await m.answer("Пусто. Пришли ID канала.")
+    await state.update_data(channel_id=raw)
     await state.set_state(AdminFSM.ch_title)
-    await m.answer(
-        f"✅ Канал: <b>{html.escape(title)}</b>\n\n"
-        "Название для кнопки (Enter — оставить как есть):",
-        reply_markup=kb(("⏭ Пропустить", "adm:ch_skip_title"), cancel="adm:cancel"))
-
-
-@adm.callback_query(F.data == "adm:ch_skip_title")
-@admin_only
-async def channel_skip_title(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminFSM.ch_link)
-    await cb.message.answer(
-        "Ссылка для кнопки (Enter — оставить авто):",
-        reply_markup=kb(("⏭ Пропустить", "adm:ch_skip_link"), cancel="adm:cancel"))
-    await cb.answer()
+    await m.answer("Название канала (для отображения):",
+                   reply_markup=cancel_admin())
 
 
 @adm.message(StateFilter(AdminFSM.ch_title))
 @admin_only
-async def channel_add_title(m: Message, state: FSMContext):
+async def channel_title_step(m: Message, state: FSMContext):
     title = (m.text or "").strip()
-    if title:
-        await state.update_data(ch_title=title)
+    if not title:
+        return await m.answer("Название не может быть пустым.")
+    await state.update_data(title=title)
     await state.set_state(AdminFSM.ch_link)
     await m.answer(
-        "Ссылка для кнопки (Enter — оставить авто):",
-        reply_markup=kb(("⏭ Пропустить", "adm:ch_skip_link"), cancel="adm:cancel"))
-
-
-@adm.callback_query(F.data == "adm:ch_skip_link")
-@admin_only
-async def channel_skip_link(cb: CallbackQuery, state: FSMContext):
-    await channel_finish(cb.message, state, cb.from_user.id)
-    await cb.answer("Канал добавлен")
+        "Ссылка для подписки (например, <code>https://t.me/your_channel</code>).\n"
+        "Можно <code>-</code>, чтобы взять автоматически.",
+        reply_markup=cancel_admin())
 
 
 @adm.message(StateFilter(AdminFSM.ch_link))
 @admin_only
-async def channel_add_link(m: Message, state: FSMContext):
-    link = (m.text or "").strip()
-    if link and not link.startswith(("http://", "https://")):
-        link = f"https://{link}"
-    if link:
-        await state.update_data(ch_link=link)
-    await channel_finish(m, state, m.from_user.id)
-
-
-async def channel_finish(target: Message, state: FSMContext, admin_id: int):
+async def channel_link_step(m: Message, state: FSMContext):
+    raw = (m.text or "").strip()
     d = await state.get_data()
-    ch_add(d["ch_id"], d["ch_title"], d["ch_link"])
+    channel_id = d["channel_id"]
+    title = d["title"]
+    if raw in ("-", ""):
+        link = f"https://t.me/{channel_id.lstrip('@')}"
+    else:
+        if not raw.startswith(("http://", "https://")):
+            return await m.answer("Ссылка должна начинаться с http:// или https://")
+        link = raw
+    ch_add(channel_id, title, link)
     await state.clear()
-    await target.answer(
-        f"✅ Канал добавлен: <b>{html.escape(d['ch_title'])}</b>",
-        reply_markup=admin_menu())
-    await log_event(target.bot, "settings",
-                    f"📢 <b>Канал добавлен в подписку</b>\n"
-                    f"🆔 <code>{html.escape(d['ch_id'])}</code>\n"
-                    f"📝 {html.escape(d['ch_title'])}\n"
-                    f"👨‍💼 <code>{admin_id}</code>")
+    await m.answer(f"✅ Канал <b>{html.escape(title)}</b> добавлен.",
+                   reply_markup=admin_menu())
+    await log_event(m.bot, "settings",
+                    f"➕ <b>Канал добавлен</b>\n"
+                    f"📢 {html.escape(title)}\n"
+                    f"🆔 <code>{html.escape(channel_id)}</code>\n"
+                    f"👨‍💼 <code>{m.from_user.id}</code>")
 
 
 # --- чёрный список ---
 @adm.callback_query(F.data == "adm:blacklist")
 @admin_only
-async def bl_menu(cb: CallbackQuery, state: FSMContext):
+async def blacklist_menu(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    bl = bl_all()
-    lines = ["🚫 <b>ЧЁРНЫЙ СПИСОК</b>", HR, ""]
-    if not bl:
-        lines.append("Пусто.")
-    else:
-        for r in bl[:15]:
-            lines.append(f"• <code>{r['user_id']}</code> — {html.escape(r['reason'] or '')}")
-    lines.append("\nТапни ❌, чтобы убрать. Или добавь 👇")
-    rows = [[(f"❌ {r['user_id']}", f"adm:bl_del:{r['user_id']}")] for r in bl[:15]]
-    rows.append([("➕ Добавить", "adm:bl_add")])
-    rows.append([("⬅️ Назад", "adm:main")])
-    await edit(cb.message, "\n".join(lines), reply_markup=kb(*rows))
+    rows = bl_all()
+    if not rows:
+        return await edit(
+            cb.message,
+            f"🚫 <b>ЧЁРНЫЙ СПИСОК</b>\n{HR}\n\nПусто.",
+            reply_markup=kb(("➕ Добавить", "adm:bl_add"),
+                            ("⬅️ Назад", "adm:main")))
+    lines = [f"🚫 <b>ЧЁРНЫЙ СПИСОК</b>\n{HR}\n"]
+    buttons = []
+    for r in rows[:15]:
+        lines.append(
+            f"<code>{r['user_id']}</code>\n"
+            f"  📝 {html.escape(r['reason'] or '—')}\n"
+            f"  📅 {r['created_at'][:16]}")
+        buttons.append([(f"❌ {r['user_id']}",
+                         f"adm:bl_del:{r['user_id']}")])
+    buttons.append([("➕ Добавить", "adm:bl_add")])
+    buttons.append([("⬅️ Назад", "adm:main")])
+    await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
     await cb.answer()
+
+
+@adm.callback_query(F.data == "adm:bl_add")
+@admin_only
+async def bl_add_start(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.bl_user)
+    await cb.message.answer("Пришли <code>user_id</code> для бана:",
+                            reply_markup=cancel_admin())
+    await cb.answer()
+
+
+@adm.message(StateFilter(AdminFSM.bl_user))
+@admin_only
+async def bl_add_user(m: Message, state: FSMContext):
+    try:
+        uid = int((m.text or "").strip())
+    except ValueError:
+        return await m.answer("Нужно число.")
+    await state.update_data(bl_uid=uid)
+    await state.set_state(AdminFSM.bl_reason)
+    await m.answer("Причина бана:", reply_markup=cancel_admin())
+
+
+@adm.message(StateFilter(AdminFSM.bl_reason))
+@admin_only
+async def bl_add_reason(m: Message, state: FSMContext):
+    d = await state.get_data()
+    uid = d["bl_uid"]
+    reason = (m.text or "").strip()
+    if not reason:
+        return await m.answer("Причина не может быть пустой.")
+    bl_add(uid, reason)
+    await state.clear()
+    await m.answer(f"✅ <code>{uid}</code> в ЧС.", reply_markup=admin_menu())
+    await log_event(m.bot, "users",
+                    f"🚫 <b>Добавлен в ЧС</b>\n"
+                    f"👤 <code>{uid}</code>\n"
+                    f"📝 {html.escape(reason)}\n"
+                    f"👨‍💼 <code>{m.from_user.id}</code>",
+                    level="warning")
 
 
 @adm.callback_query(F.data.startswith("adm:bl_del:"))
@@ -2564,48 +2823,30 @@ async def bl_del_cb(cb: CallbackQuery):
     uid = int(cb.data.split(":", 2)[2])
     bl_del(uid)
     await cb.answer(f"{uid} удалён из ЧС")
-    await edit(cb.message, "🚫 <b>Чёрный список обновлён.</b>",
-               reply_markup=kb(back="adm:blacklist"))
     await log_event(cb.bot, "users",
-                    f"✅ <b>Удалён из ЧС</b>\n👤 uid: <code>{uid}</code>\n"
-                    f"👨‍💼 Админ: <code>{cb.from_user.id}</code>")
-
-
-@adm.callback_query(F.data == "adm:bl_add")
-@admin_only
-async def bl_add_start(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminFSM.bl_user)
-    await cb.message.answer("Пришли <code>user_id</code> (число):",
-                            reply_markup=cancel_admin())
-    await cb.answer()
-
-
-@adm.message(StateFilter(AdminFSM.bl_user))
-@admin_only
-async def bl_user(m: Message, state: FSMContext):
-    try:
-        uid = int((m.text or "").strip())
-    except ValueError:
-        return await m.answer("Нужно число.")
-    await state.update_data(bl_uid=uid)
-    await state.set_state(AdminFSM.bl_reason)
-    await m.answer("Причина блокировки:", reply_markup=cancel_admin())
-
-
-@adm.message(StateFilter(AdminFSM.bl_reason))
-@admin_only
-async def bl_reason(m: Message, state: FSMContext):
-    d = await state.get_data()
-    reason = (m.text or "").strip()
-    bl_add(d["bl_uid"], reason)
-    await state.clear()
-    await m.answer(f"✅ {d['bl_uid']} добавлен в чёрный список.",
-                   reply_markup=admin_menu())
-    await log_event(m.bot, "users",
-                    f"🚫 <b>Добавлен в ЧС</b>\n👤 uid: <code>{d['bl_uid']}</code>\n"
-                    f"📝 Причина: {html.escape(reason)}\n"
-                    f"👨‍💼 Админ: <code>{m.from_user.id}</code>",
+                    f"♻️ <b>Удалён из ЧС</b>\n👤 <code>{uid}</code>\n"
+                    f"👨‍💼 <code>{cb.from_user.id}</code>",
                     level="warning")
+    # Перерисовать
+    rows = bl_all()
+    if not rows:
+        await edit(cb.message,
+                   f"🚫 <b>ЧЁРНЫЙ СПИСОК</b>\n{HR}\n\nПусто.",
+                   reply_markup=kb(("➕ Добавить", "adm:bl_add"),
+                                   ("⬅️ Назад", "adm:main")))
+    else:
+        lines = [f"🚫 <b>ЧЁРНЫЙ СПИСОК</b>\n{HR}\n"]
+        buttons = []
+        for r in rows[:15]:
+            lines.append(
+                f"<code>{r['user_id']}</code>\n"
+                f"  📝 {html.escape(r['reason'] or '—')}\n"
+                f"  📅 {r['created_at'][:16]}")
+            buttons.append([(f"❌ {r['user_id']}",
+                             f"adm:bl_del:{r['user_id']}")])
+        buttons.append([("➕ Добавить", "adm:bl_add")])
+        buttons.append([("⬅️ Назад", "adm:main")])
+        await edit(cb.message, "\n".join(lines), reply_markup=kb(*buttons))
 
 
 # --- админы ---
@@ -2613,17 +2854,11 @@ async def bl_reason(m: Message, state: FSMContext):
 @admin_only
 async def admins_menu(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    ids = adm_db()
-    lines = [f"👤 <b>АДМИНЫ</b>", HR,
-             f"Из ENV: <code>{', '.join(map(str, ADMIN_IDS)) or '—'}</code>", ""]
-    if ids:
-        lines.append("Из БД:")
-        for uid in ids:
-            lines.append(f"• <code>{uid}</code>")
-    else:
-        lines.append("Из БД: пусто.")
-    lines.append("\n<i>ENV-админов нельзя удалить здесь.</i>")
-    await edit(cb.message, "\n".join(lines), reply_markup=admins_kb())
+    await edit(cb.message,
+               f"👤 <b>АДМИНЫ</b>\n{HR}\n\n"
+               "Список добавленных через бота (ADMIN_IDS из .env не удаляются).\n\n"
+               "Тапни ❌ для удаления 👇",
+               reply_markup=admins_kb())
     await cb.answer()
 
 
@@ -2645,119 +2880,59 @@ async def adm_add_finish(m: Message, state: FSMContext):
         return await m.answer("Нужно число.")
     adm_add(uid, m.from_user.id)
     await state.clear()
-    await m.answer(f"✅ {uid} добавлен в админы.", reply_markup=admin_menu())
-    await log_event(m.bot, "users",
-                    f"👤 <b>Новый админ</b>\n🆔 <code>{uid}</code>\n"
-                    f"👨‍💼 Добавил: <code>{m.from_user.id}</code>")
+    await m.answer(f"✅ <code>{uid}</code> теперь админ.",
+                   reply_markup=admin_menu())
+    await log_event(m.bot, "settings",
+                    f"➕ <b>Новый админ</b>\n👤 <code>{uid}</code>\n"
+                    f"👨‍💼 <code>{m.from_user.id}</code>")
 
 
 @adm.callback_query(F.data.startswith("adm:adm_del:"))
 @admin_only
-async def adm_del_finish(cb: CallbackQuery):
+async def adm_del_cb(cb: CallbackQuery):
     uid = int(cb.data.split(":", 2)[2])
-    if uid in ADMIN_IDS:
-        return await cb.answer("ENV-админа нельзя удалить", show_alert=True)
     adm_del(uid)
     await cb.answer(f"{uid} больше не админ")
-    await edit(cb.message, "👤 Админ удалён.",
-               reply_markup=kb(back="adm:admins"))
-    await log_event(cb.bot, "users",
-                    f"❌ <b>Админ удалён</b>\n🆔 <code>{uid}</code>\n"
-                    f"👨‍💼 Удалил: <code>{cb.from_user.id}</code>",
+    await log_event(cb.bot, "settings",
+                    f"❌ <b>Админ удалён</b>\n👤 <code>{uid}</code>\n"
+                    f"👨‍💼 <code>{cb.from_user.id}</code>",
                     level="warning")
-
-
-# --- короткие команды ---
-@adm.message(Command("add"))
-@admin_only
-async def add_cmd(m: Message, state: FSMContext):
-    await state.set_state(AdminFSM.b_file)
-    await m.answer("Пришли баннер как файл (document).", reply_markup=cancel_admin())
-
-
-@adm.message(Command("queue"))
-@admin_only
-async def queue_cmd(m: Message):
-    rows = p_list("pending")
-    if not rows:
-        return await m.answer("Очередь пуста.")
-    await m.answer(f"📋 Заявок на проверке: {len(rows)}. Открываю первую.",
-                   reply_markup=payouts_filter_kb("pending"))
-    await show_card(m, "pending", 0)
-
-
-@adm.message(Command("withdraws"))
-@admin_only
-async def withdraws_cmd(m: Message):
-    rows = wd_list("pending")
-    if not rows:
-        return await m.answer("Заявок на вывод нет.")
-    lines = [f"📤 <b>ВЫВОДЫ В ОЖИДАНИИ: {len(rows)}</b>\n{HR}\n"]
-    for r in rows[:10]:
-        lines.append(f"#{r['id']} — <code>{r['user_id']}</code> — "
-                     f"{r['wcoins']} Wcoins → {wcoins_to_usdt_str(r['wcoins'])} USDT")
-    lines.append("\nОткрой в админке: 📤 Выводы Wcoins")
-    await m.answer("\n".join(lines))
-
-
-@adm.message(Command("blacklist"))
-@admin_only
-async def blacklist_cmd(m: Message):
-    parts = (m.text or "").split(maxsplit=2)
-    if len(parts) < 3:
-        return await m.answer("Использование: /blacklist <user_id> <причина>")
-    try:
-        uid = int(parts[1])
-    except ValueError:
-        return await m.answer("user_id должен быть числом.")
-    bl_add(uid, parts[2])
-    await m.answer(f"Пользователь {uid} в чёрном списке.")
-    await log_event(m.bot, "users",
-                    f"🚫 <b>ЧС через команду</b>\n👤 <code>{uid}</code>\n"
-                    f"📝 {html.escape(parts[2])}\n"
-                    f"👨‍💼 Админ: <code>{m.from_user.id}</code>",
-                    level="warning")
+    await edit(cb.message,
+               f"👤 <b>АДМИНЫ</b>\n{HR}\n\nТапни ❌ для удаления 👇",
+               reply_markup=admins_kb())
 
 
 # =========================================================
 # FALLBACK
 # =========================================================
 @fallback.message()
-async def fb_msg(m: Message):
-    await send(m, "Используй меню или /start 👇", reply_markup=user_menu())
-
-
-@fallback.callback_query()
-async def fb_cb(cb: CallbackQuery):
-    await cb.answer("Кнопка устарела. /start", show_alert=True)
+async def fallback_any(m: Message):
+    await m.answer("Не понял команду. Используй /start.")
 
 
 # =========================================================
 # MAIN
 # =========================================================
 async def main():
+    if not BOT_TOKEN:
+        raise SystemExit("BOT_TOKEN не задан в .env")
+
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            RotatingFileHandler("bot.log", maxBytes=10 * 1024 * 1024,
-                                backupCount=5, encoding="utf-8"),
-        ])
-    logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    fh = RotatingFileHandler("bot.log", maxBytes=2_000_000, backupCount=3,
+                             encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(fh)
 
     init_db()
 
-    if not BOT_TOKEN:
-        raise SystemExit("Задай BOT_TOKEN (env или .env)")
-
-    bot = Bot(token=BOT_TOKEN,
-              default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=FSMStorage(conn))
 
     dp.message.middleware(LogMW())
     dp.callback_query.middleware(LogMW())
-
     dp.message.middleware(SubscriptionMW())
     dp.callback_query.middleware(SubscriptionMW())
 
@@ -2766,12 +2941,8 @@ async def main():
     dp.include_router(adm)
     dp.include_router(fallback)
 
-    logger.info("Бот запущен")
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await bot.session.close()
-        logger.info("Бот остановлен")
+    logger.info("Bot started")
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
 if __name__ == "__main__":
