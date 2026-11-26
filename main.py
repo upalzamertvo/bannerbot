@@ -1,11 +1,11 @@
 """
 VPN Payout Bot — compact rewrite.
-- Рекламный текст убран
-- Кнопка "Скачать файл" убрана
-- Поддержка: FSM внутри бота, логи в топик support, ответ через reply
-- Купить звёзды: URL-кнопка на https://t.me/wsquadstars_bot
-- Новости: https://t.me/wstarsforsale
-- Цена звёзд убрана
+- Рекламный текст убран, "Скачать файл" убран
+- Поддержка: обращение в ЛС админа, ответ через reply в ЛС бота,
+  дубль в лог-топик "support" (только история)
+- Обязательная подписка: админ добавляет/убирает каналы
+- Купить звёзды: URL-кнопка
+- Новости: URL-кнопка
 """
 import asyncio
 import html
@@ -131,6 +131,7 @@ DEFAULTS = {
     ),
     "news_url": "https://t.me/wstarsforsale",
     "stars_url": "https://t.me/wsquadstars_bot",
+    "support_chat_id": "",
     "log_enabled": "0", "log_chat_id": "",
     "log_topic_payouts": "", "log_topic_banners": "", "log_topic_users": "",
     "log_topic_settings": "", "log_topic_errors": "", "log_topic_support": "",
@@ -163,6 +164,7 @@ LABELS = {
     "title_admin": "🛠 Заголовок админки",
     "news_url": "📢 URL канала новостей",
     "stars_url": "⭐ Ссылка на покупку звёзд",
+    "support_chat_id": "📞 ID получателя обращений",
     "log_chat_id": "🎯 ID группы для логов",
     "log_topic_payouts": "💰 ID темы «Заявки»",
     "log_topic_banners": "🗂 ID темы «Баннеры»",
@@ -235,6 +237,12 @@ def init_db():
             referred_id INTEGER NOT NULL UNIQUE,
             bonus_paid INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id TEXT NOT NULL UNIQUE,
+            title TEXT,
+            invite_link TEXT,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
 
 
@@ -379,6 +387,37 @@ def ref_mark_paid(rid):
     _x("UPDATE referrals SET bonus_paid=1 WHERE id=?", (rid,))
 
 
+# --- channels (обязательная подписка) ---
+def ch_all():
+    return _all("SELECT * FROM channels ORDER BY id")
+
+def ch_count():
+    return _one("SELECT COUNT(*) c FROM channels")["c"]
+
+def ch_add(channel_id: str, title: str, invite_link: str):
+    _x("INSERT OR REPLACE INTO channels(channel_id,title,invite_link) VALUES(?,?,?)",
+       (channel_id, title, invite_link))
+
+def ch_del(cid: int):
+    _x("DELETE FROM channels WHERE id=?", (cid,))
+
+def ch_get(cid: int):
+    return _one("SELECT * FROM channels WHERE id=?", (cid,))
+
+
+async def check_sub(bot: Bot, user_id: int) -> list[dict]:
+    """Возвращает каналы, на которые юзер НЕ подписан."""
+    not_subbed = []
+    for ch in ch_all():
+        try:
+            member = await bot.get_chat_member(ch["channel_id"], user_id)
+            if member.status in ("left", "kicked"):
+                not_subbed.append(dict(ch))
+        except Exception as e:
+            logger.warning(f"Не смог проверить подписку на {ch['channel_id']}: {e}")
+    return not_subbed
+
+
 def valid_link(link: str) -> bool:
     try:
         p = urlparse(link)
@@ -489,6 +528,15 @@ def kb(*rows, back=None, cancel=None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def subscribe_kb(channels: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for ch in channels:
+        link = ch["invite_link"] or f"https://t.me/{ch['channel_id'].lstrip('@')}"
+        rows.append([(f"📢 {ch['title'] or ch['channel_id']}", link)])
+    rows.append([("✅ Я подписался", "check_sub")])
+    return kb(*rows)
+
+
 # --- decorators ---
 def admin_only(func):
     @wraps(func)
@@ -567,6 +615,46 @@ class LogMW(BaseMiddleware):
             raise
 
 
+class SubscriptionMW(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if not ch_count():
+            return await handler(event, data)
+
+        user = data.get("event_from_user")
+        if not user:
+            return await handler(event, data)
+
+        if is_admin(user.id):
+            return await handler(event, data)
+
+        if isinstance(event, CallbackQuery) and event.data == "check_sub":
+            return await handler(event, data)
+        if isinstance(event, Message):
+            txt = (event.text or "").strip()
+            if txt.startswith("/start"):
+                return await handler(event, data)
+
+        not_subbed = await check_sub(data["bot"], user.id)
+        if not not_subbed:
+            return await handler(event, data)
+
+        text_msg = (
+            "🔒 <b>ТРЕБУЕТСЯ ПОДПИСКА</b>\n"
+            f"{HR}\n\n"
+            "Чтобы пользоваться ботом, подпишись на каналы ниже 👇"
+        )
+        markup = subscribe_kb(not_subbed)
+        if isinstance(event, CallbackQuery):
+            try:
+                await event.message.answer(text_msg, reply_markup=markup)
+            except Exception:
+                pass
+            await event.answer("Сначала подпишись", show_alert=True)
+        else:
+            await event.answer(text_msg, reply_markup=markup)
+        return
+
+
 # =========================================================
 # KEYBOARDS (semantic)
 # =========================================================
@@ -585,6 +673,7 @@ def admin_menu() -> InlineKeyboardMarkup:
         ("📊 Статистика", "adm:stats"),
         ("📋 Заявки", "adm:payouts:pending"),
         ("🗂 Баннеры", "adm:banners:1"),
+        ("📢 Каналы (подписка)", "adm:channels"),
         ("🎨 Оформление", "adm:style:menu"),
         ("⚙️ Настройки", "adm:settings"),
         ("📡 Логи", "adm:log:menu"),
@@ -633,6 +722,7 @@ def settings_kb():
         ("🚦 Лимит заявок/день", "adm:set:daily_limit"),
         ("📢 URL новостей", "adm:set:news_url"),
         ("⭐ Ссылка на покупку звёзд", "adm:set:stars_url"),
+        ("📞 ID получателя обращений", "adm:set:support_chat_id"),
         back="adm:main",
     )
 
@@ -702,6 +792,7 @@ class AdminFSM(StatesGroup):
     set_value = State(); style_edit = State(); log_value = State()
     b_file = State(); b_title = State(); b_cat = State()
     reject_reason = State(); bl_user = State(); bl_reason = State(); adm_user = State()
+    ch_id = State(); ch_title = State(); ch_link = State()
 
 
 class SupportFSM(StatesGroup):
@@ -768,7 +859,32 @@ async def start(m: Message, state: FSMContext):
     await log_event(m.bot, "users",
                     f"👋 <b>Новый /start</b>\n👤 <code>{uid}</code> "
                     f"@{uname or '—'}\n🪪 {html.escape(fname or '')}")
+
+    if not is_admin(uid):
+        not_subbed = await check_sub(m.bot, uid)
+        if not_subbed:
+            await m.answer(
+                "🔒 <b>ТРЕБУЕТСЯ ПОДПИСКА</b>\n"
+                f"{HR}\n\n"
+                "Чтобы пользоваться ботом, подпишись на каналы ниже 👇",
+                reply_markup=subscribe_kb(not_subbed))
+            return
+
     await send(m, menu_text(m.from_user), reply_markup=user_menu())
+
+
+@user.callback_query(F.data == "check_sub")
+@autoclose
+async def check_sub_cb(cb: CallbackQuery, state: FSMContext):
+    not_subbed = await check_sub(cb.bot, cb.from_user.id)
+    if not_subbed:
+        names = ", ".join(ch["title"] or ch["channel_id"] for ch in not_subbed)
+        await cb.answer(f"Ещё не подписан: {names}", show_alert=True)
+        return
+    await state.clear()
+    if cb.message:
+        await edit(cb.message, menu_text(cb.from_user), reply_markup=user_menu())
+    await cb.answer("✅ Спасибо за подписку!")
 
 
 @user.message(Command("rules"))
@@ -817,7 +933,6 @@ async def support_message(m: Message, state: FSMContext):
 
     if not text_body and not (m.photo or m.video or m.document or m.voice or m.audio):
         return await m.answer("Напиши текстом или пришли файл.")
-
     if text_body and len(text_body) < 5:
         return await m.answer("Слишком коротко. Опиши подробнее.")
     if text_body and len(text_body) > 4000:
@@ -828,39 +943,48 @@ async def support_message(m: Message, state: FSMContext):
     uname = m.from_user.username or "—"
     fname = m.from_user.full_name or ""
 
+    target_raw = s("support_chat_id").strip()
+    if target_raw.lstrip("-").isdigit():
+        target = int(target_raw)
+    elif ADMIN_IDS:
+        target = ADMIN_IDS[0]
+    else:
+        return await m.answer("⚠️ Поддержка временно недоступна.")
+
     await m.answer(
         f"✅ <b>Обращение принято</b>\n{HR}\n"
         "Мы ответим тебе здесь же, в этом чате.\n"
         "Обычно это занимает до 24 часов.",
         reply_markup=user_menu())
 
-    log_chat = s("log_chat_id").strip()
-    support_topic = s("log_topic_support").strip()
-    tid = int(support_topic) if support_topic.isdigit() and int(support_topic) > 0 else None
+    try:
+        await m.bot.send_message(
+            target,
+            f"📞 <b>ОБРАЩЕНИЕ В ПОДДЕРЖКУ</b>\n{HR}\n"
+            f"👤 <code>{uid}</code> @{uname}\n"
+            f"🪪 {html.escape(fname)}\n{HR}\n"
+            f"{html.escape(text_body) if text_body else '<i>вложение ниже</i>'}\n\n"
+            f"↪️ <i>Ответь на это сообщение, чтобы написать юзеру.</i>",
+            parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.warning(f"Не отправил обращение админу: {e}")
+        return await m.answer("⚠️ Не удалось доставить обращение. Попробуй позже.")
 
-    if s("log_enabled") == "1" and log_chat.lstrip("-").isdigit():
-        chat_id = int(log_chat)
+    if m.photo or m.video or m.document or m.voice or m.audio:
         try:
-            await m.bot.send_message(
-                chat_id,
-                f"📞 <b>ОБРАЩЕНИЕ В ПОДДЕРЖКУ</b>\n{HR}\n"
-                f"👤 <code>{uid}</code> @{uname}\n"
-                f"🪪 {html.escape(fname)}\n{HR}\n"
-                f"{html.escape(text_body) if text_body else '<i>вложение ниже</i>'}",
-                message_thread_id=tid,
-                parse_mode=ParseMode.HTML)
+            await m.bot.forward_message(
+                chat_id=target,
+                from_chat_id=m.chat.id,
+                message_id=m.message_id)
         except Exception as e:
-            logger.warning(f"Не отправил лог поддержки: {e}")
+            logger.warning(f"Не переслал вложение админу: {e}")
 
-        if m.photo or m.video or m.document or m.voice or m.audio:
-            try:
-                await m.bot.forward_message(
-                    chat_id=chat_id,
-                    from_chat_id=m.chat.id,
-                    message_id=m.message_id,
-                    message_thread_id=tid)
-            except Exception as e:
-                logger.warning(f"Не переслал вложение из поддержки: {e}")
+    await log_event(
+        m.bot, "support",
+        f"📞 <b>ОБРАЩЕНИЕ В ПОДДЕРЖКУ</b>\n{HR}\n"
+        f"👤 <code>{uid}</code> @{uname}\n"
+        f"🪪 {html.escape(fname)}\n{HR}\n"
+        f"{html.escape(text_body) if text_body else '<i>вложение (в ЛС админу)</i>'}")
 
 
 # --- faq / news ---
@@ -1268,6 +1392,7 @@ async def stats(cb: CallbackQuery):
             f"🚫 В ЧС: <b>{_one('SELECT COUNT(*) c FROM blacklist')['c']}</b>\n"
             f"👥 Юзеров: <b>{_one('SELECT COUNT(*) c FROM users')['c']}</b>\n"
             f"🎁 Рефералов: <b>{_one('SELECT COUNT(*) c FROM referrals')['c']}</b>\n"
+            f"📢 Каналов: <b>{ch_count()}</b>\n"
             f"👤 Админов: <b>{len(set(ADMIN_IDS) | set(adm_db()))}</b>")
     await edit(cb.message, body, reply_markup=back_admin())
     await cb.answer()
@@ -1433,14 +1558,10 @@ async def mark_paid(cb: CallbackQuery):
     await cb.answer("Выплачено")
 
 
-# --- ответ поддержки через reply ---
-@adm.message(F.chat.type.in_({"group", "supergroup"}), F.reply_to_message)
+# --- ответ поддержки через reply в ЛС бота ---
+@adm.message(F.chat.type == "private", F.reply_to_message, ~StateFilter(AdminFSM))
 async def admin_reply_support(m: Message):
-    log_chat = s("log_chat_id").strip()
-    if not log_chat.lstrip("-").isdigit() or m.chat.id != int(log_chat):
-        return
-    support_topic = s("log_topic_support").strip()
-    if not support_topic.isdigit() or m.message_thread_id != int(support_topic):
+    if not is_admin(m.from_user.id):
         return
     replied_text = m.reply_to_message.text or ""
     match = re.search(r"👤 <code>(\d+)</code>", replied_text)
@@ -1456,6 +1577,12 @@ async def admin_reply_support(m: Message):
             f"📞 <b>Ответ поддержки</b>\n{HR}\n{html.escape(reply_text)}",
             parse_mode=ParseMode.HTML)
         await m.reply("✅ Отправлено юзеру.")
+        await log_event(
+            m.bot, "support",
+            f"✅ <b>Ответ поддержки</b>\n{HR}\n"
+            f"👤 <code>{uid}</code>\n"
+            f"👨‍💼 <code>{m.from_user.id}</code>\n"
+            f"📝 {html.escape(reply_text[:500])}")
     except Exception as e:
         await m.reply(f"❌ Не доставлено: {html.escape(str(e)[:200])}")
 
@@ -1708,7 +1835,8 @@ async def settings_menu(cb: CallbackQuery, state: FSMContext):
                f"⏳ Дней холда: <b>{s('hold_days')}</b>\n"
                f"🚦 Лимит заявок/день: <b>{s('daily_limit')}</b>\n"
                f"📢 Новости: <code>{html.escape(s('news_url'))}</code>\n"
-               f"⭐ Звёзды: <code>{html.escape(s('stars_url'))}</code>\n\n"
+               f"⭐ Звёзды: <code>{html.escape(s('stars_url'))}</code>\n"
+               f"📞 Обращения: <code>{html.escape(s('support_chat_id') or '—')}</code>\n\n"
                "Тапни на параметр, чтобы изменить 👇",
                reply_markup=settings_kb())
     await cb.answer()
@@ -1744,6 +1872,9 @@ async def set_finish(m: Message, state: FSMContext):
     if key in ("news_url", "stars_url"):
         if not value.startswith(("http://", "https://")):
             return await m.answer("Ссылка должна начинаться с http:// или https://")
+    if key == "support_chat_id":
+        if value and not value.lstrip("-").isdigit():
+            return await m.answer("Нужен числовой ID.")
 
     old = s(key)
     s_set(key, value)
@@ -1846,6 +1977,137 @@ async def banner_cat(m: Message, state: FSMContext):
                     f"➕ <b>Баннер добавлен</b>\n🖼 #{bid} «{html.escape(d['title'])}»\n"
                     f"📁 {html.escape(cat)}\n"
                     f"👨‍💼 Админ: <code>{m.from_user.id}</code>")
+
+
+# --- каналы подписки ---
+@adm.callback_query(F.data == "adm:channels")
+@admin_only
+async def channels_menu(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    chs = ch_all()
+    lines = ["📢 <b>ОБЯЗАТЕЛЬНАЯ ПОДПИСКА</b>", HR, ""]
+    if not chs:
+        lines.append("Каналов нет. Бот работает без подписки.")
+    else:
+        for ch in chs:
+            lines.append(
+                f"• <b>{html.escape(ch['title'] or '—')}</b>\n"
+                f"  <code>{html.escape(ch['channel_id'])}</code>\n"
+                f"  {html.escape(ch['invite_link'] or '')}")
+    lines.append("\nТапни ❌, чтобы убрать 👇")
+    rows = [[(f"❌ {ch['title'] or ch['channel_id']}", f"adm:ch_del:{ch['id']}")]
+            for ch in chs]
+    rows.append([("➕ Добавить канал", "adm:ch_add")])
+    rows.append([("⬅️ Назад", "adm:main")])
+    await edit(cb.message, "\n".join(lines), reply_markup=kb(*rows))
+    await cb.answer()
+
+
+@adm.callback_query(F.data.startswith("adm:ch_del:"))
+@admin_only
+async def channel_del(cb: CallbackQuery):
+    cid = int(cb.data.split(":", 2)[2])
+    ch = ch_get(cid)
+    if not ch:
+        return await cb.answer("Не найдено", show_alert=True)
+    ch_del(cid)
+    await cb.answer("Канал удалён")
+    await log_event(cb.bot, "settings",
+                    f"📢 <b>Канал удалён из подписки</b>\n"
+                    f"<code>{html.escape(ch['channel_id'])}</code>\n"
+                    f"👨‍💼 <code>{cb.from_user.id}</code>",
+                    level="warning")
+    await edit(cb.message, "📢 Канал удалён. Открой меню заново.",
+               reply_markup=kb(back="adm:channels"))
+
+
+@adm.callback_query(F.data == "adm:ch_add")
+@admin_only
+async def channel_add_start(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.ch_id)
+    await cb.message.answer(
+        f"📢 <b>ДОБАВЛЕНИЕ КАНАЛА</b>\n{HR}\n\n"
+        "Пришли <code>@username</code> канала или его ID (<code>-100...</code>).\n\n"
+        "⚠️ Бот должен быть админом в канале.",
+        reply_markup=cancel_admin())
+    await cb.answer()
+
+
+@adm.message(StateFilter(AdminFSM.ch_id))
+@admin_only
+async def channel_add_id(m: Message, state: FSMContext):
+    raw = (m.text or "").strip()
+    if not raw:
+        return await m.answer("Нужен @username или ID.")
+    channel_id = raw if (raw.startswith("@") or raw.lstrip("-").isdigit()) else f"@{raw}"
+    try:
+        chat = await m.bot.get_chat(channel_id)
+        title = chat.title or channel_id
+        invite = chat.invite_link or (f"https://t.me/{chat.username}" if chat.username else "")
+    except Exception as e:
+        return await m.answer(
+            f"❌ Не смог получить канал: {html.escape(str(e)[:200])}\n\n"
+            "Проверь, что бот админ в канале.")
+    await state.update_data(ch_id=channel_id, ch_title=title, ch_link=invite)
+    await state.set_state(AdminFSM.ch_title)
+    await m.answer(
+        f"✅ Канал: <b>{html.escape(title)}</b>\n\n"
+        "Название для кнопки (Enter — оставить как есть):",
+        reply_markup=kb(("⏭ Пропустить", "adm:ch_skip_title"), cancel="adm:cancel"))
+
+
+@adm.callback_query(F.data == "adm:ch_skip_title")
+@admin_only
+async def channel_skip_title(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.ch_link)
+    await cb.message.answer(
+        "Ссылка для кнопки (Enter — оставить авто):",
+        reply_markup=kb(("⏭ Пропустить", "adm:ch_skip_link"), cancel="adm:cancel"))
+    await cb.answer()
+
+
+@adm.message(StateFilter(AdminFSM.ch_title))
+@admin_only
+async def channel_add_title(m: Message, state: FSMContext):
+    title = (m.text or "").strip()
+    if title:
+        await state.update_data(ch_title=title)
+    await state.set_state(AdminFSM.ch_link)
+    await m.answer(
+        "Ссылка для кнопки (Enter — оставить авто):",
+        reply_markup=kb(("⏭ Пропустить", "adm:ch_skip_link"), cancel="adm:cancel"))
+
+
+@adm.callback_query(F.data == "adm:ch_skip_link")
+@admin_only
+async def channel_skip_link(cb: CallbackQuery, state: FSMContext):
+    await channel_finish(cb.message, state, cb.from_user.id)
+    await cb.answer("Канал добавлен")
+
+
+@adm.message(StateFilter(AdminFSM.ch_link))
+@admin_only
+async def channel_add_link(m: Message, state: FSMContext):
+    link = (m.text or "").strip()
+    if link and not link.startswith(("http://", "https://")):
+        link = f"https://{link}"
+    if link:
+        await state.update_data(ch_link=link)
+    await channel_finish(m, state, m.from_user.id)
+
+
+async def channel_finish(target: Message, state: FSMContext, admin_id: int):
+    d = await state.get_data()
+    ch_add(d["ch_id"], d["ch_title"], d["ch_link"])
+    await state.clear()
+    await target.answer(
+        f"✅ Канал добавлен: <b>{html.escape(d['ch_title'])}</b>",
+        reply_markup=admin_menu())
+    await log_event(target.bot, "settings",
+                    f"📢 <b>Канал добавлен в подписку</b>\n"
+                    f"🆔 <code>{html.escape(d['ch_id'])}</code>\n"
+                    f"📝 {html.escape(d['ch_title'])}\n"
+                    f"👨‍💼 <code>{admin_id}</code>")
 
 
 # --- чёрный список ---
@@ -2053,6 +2315,9 @@ async def main():
 
     dp.message.middleware(LogMW())
     dp.callback_query.middleware(LogMW())
+
+    dp.message.middleware(SubscriptionMW())
+    dp.callback_query.middleware(SubscriptionMW())
 
     dp.include_router(user)
     dp.include_router(pay)
