@@ -804,8 +804,8 @@ def user_menu() -> InlineKeyboardMarkup:
         [(s("btn_catalog"), "cats"), (s("btn_payout"), "payout_start")],
         [(s("btn_my_payouts"), "my_payouts"), ("💰 Кошелёк", "wallet")],
         [("📊 Статистика", "my_stats"), ("🎁 Рефералка", "referral")],
-        [("📢 Новости", "news"), ("❓ FAQ", "faq")],
-        [("⭐ Купить звёзды", stars_url), ("📞 Поддержка", "support")],
+        [("📞 Поддержка", "support"), ("❓ FAQ", "faq")],
+        [("⭐ Купить звёзды", stars_url),("📢 Новости", "news")],
         [(s("btn_rules"), "rules")],
     )
 
