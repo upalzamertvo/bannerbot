@@ -375,39 +375,56 @@ _usdt_rub_cache = {"rate": USDT_RUB_FALLBACK, "ts": 0.0}
 async def _get_cp():
     """Ленивая инициализация async-клиента CryptoBot."""
     global _cp_client
-    if _cp_client is None and CRYPTO_PAY_TOKEN:
+    if _cp_client is None:
+        if not CRYPTO_PAY_TOKEN:
+            logger.warning("❌ CRYPTO_PAY_TOKEN не задан — курс будет fallback")
+            return None
         try:
             from crypto_pay_api import CryptoPayAsync, CryptoPayConfig
             _cp_client = CryptoPayAsync(CryptoPayConfig(token=CRYPTO_PAY_TOKEN))
+            logger.info("✅ CryptoBot клиент создан")
         except ImportError:
-            logger.warning("cryptopay-python-sdk не установлен, курс фиксированный")
+            logger.error("❌ cryptopay-python-sdk не установлен / модуль crypto_pay_api не найден")
         except Exception as e:
-            logger.warning(f"Ошибка инициализации CryptoBot: {e}")
+            logger.error(f"❌ Ошибка инициализации CryptoBot: {e}")
     return _cp_client
 
 
 async def fetch_usdt_rub() -> float:
     """Курс USDT/RUB с кэшем на 10 минут. Fallback — последний известный / из настроек."""
     now = time.time()
-    if now - _usdt_rub_cache["ts"] < 600:      # 10 минут
+    if now - _usdt_rub_cache["ts"] < 600:
         return _usdt_rub_cache["rate"]
 
     cp = await _get_cp()
     if cp:
         try:
             rates = await cp.get_exchange_rates()
+            logger.info(f"Получено курсов: {len(rates)}")
+            for r in rates[:5]:
+                logger.info(
+                    f"  Пример пары: {getattr(r, 'source', '?')} -> "
+                    f"{getattr(r, 'target', '?')} = {getattr(r, 'rate', '?')}"
+                )
             for r in rates:
-                if (getattr(r, "source", None) == "USDT"
-                        and getattr(r, "target", None) == "RUB"):
+                source_val = getattr(r, "source", None)
+                source_str = str(source_val) if source_val is not None else ""
+                if hasattr(source_val, "name"):
+                    source_str = source_val.name
+                target_val = getattr(r, "target", None)
+                target_str = str(target_val) if target_val is not None else ""
+                if source_str == "USDT" and target_str == "RUB":
                     rate = float(r.rate)
+                    logger.info(f"✅ Найден курс USDT/RUB: {rate}")
                     _usdt_rub_cache["rate"] = rate
                     _usdt_rub_cache["ts"] = now
                     return rate
+            logger.warning("⚠️ Пара USDT/RUB не найдена в ответе API")
         except Exception as e:
-            logger.warning(f"Не удалось получить курс USDT/RUB: {e}")
+            logger.error(f"❌ Ошибка при запросе курса: {e}")
 
-    # Fallback: настройка из админки (по умолчанию 100)
     fallback = s_float("usdt_rub", USDT_RUB_FALLBACK)
+    logger.warning(f"Использую fallback-курс: {fallback}")
     _usdt_rub_cache["rate"] = fallback
     return fallback
 
@@ -764,8 +781,6 @@ def autoclose(func):
             except Exception:
                 pass
     return wrapper
-
-
 # =========================================================
 # LOGGING
 # =========================================================
@@ -1778,8 +1793,6 @@ async def submit(cb: CallbackQuery, state: FSMContext):
                     f"🔗 {html.escape(d['link'])}\n👀 {d['views_claim']} просмотров\n"
                     f"💰 {earned} Wcoins при одобрении")
     await cb.answer("Отправлено")
-
-
 # =========================================================
 # ADMIN
 # =========================================================
@@ -2665,7 +2678,6 @@ async def channel_del(cb: CallbackQuery):
                     f"👨‍💼 Админ: <code>{cb.from_user.id}</code>",
                     level="warning")
     await cb.answer("Канал удалён")
-    await channels_menu(cb, None) if False else None
     # Перерисовываем меню каналов
     chs = ch_all()
     if not chs:
@@ -2927,6 +2939,18 @@ async def main():
     logging.getLogger().addHandler(fh)
 
     init_db()
+
+    # Диагностика курса при старте
+    logger.info("CRYPTO_PAY_TOKEN задан: %s", bool(CRYPTO_PAY_TOKEN))
+    if CRYPTO_PAY_TOKEN:
+        cp = await _get_cp()
+        if cp:
+            logger.info("CryptoBot клиент готов — проверяю курс...")
+            try:
+                rate = await fetch_usdt_rub()
+                logger.info("Стартовый курс USDT/RUB: %.2f", rate)
+            except Exception as e:
+                logger.error("Не удалось получить стартовый курс: %s", e)
 
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=FSMStorage(conn))
